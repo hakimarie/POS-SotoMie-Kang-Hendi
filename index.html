@@ -183,6 +183,8 @@ function save(){
 }
 
 /* ================= state ================= */
+var PIN_LOCK_KEY='skh_pin_lockout';
+var PIN_ITERATIONS=150000;
 var cart=[];
 var orderType='DINE_IN';
 var tab='kasir';
@@ -192,6 +194,3130 @@ var pay={method:'CASH',cash:0,qrisOk:false};
 var currentReceipt='';
 var pinFails=0;
 var pinBlockedUntil=0;
+function readPinThrottle(){
+  try{
+    var x=JSON.parse(localStorage.getItem(PIN_LOCK_KEY)||'null');
+    if(x&&Number.isInteger(x.fails)&&Number.isFinite(x.blockedUntil))return x;
+  }catch(e){}
+  return {fails:pinFails,blockedUntil:pinBlockedUntil};
+}
+function writePinThrottle(x){
+  pinFails=x.fails;pinBlockedUntil=x.blockedUntil;
+  try{localStorage.setItem(PIN_LOCK_KEY,JSON.stringify(x))}catch(e){}
+}
+function hex(buffer){
+  return Array.prototype.map.call(new Uint8Array(buffer),function(b){return b.toString(16).padStart(2,'0')}).join('');
+}
+function unhex(value){
+  if(!/^(?:[0-9a-f]{2})+$/i.test(value))throw new Error('Invalid hex');
+  var out=new Uint8Array(value.length/2);
+  for(var i=0;i<out.length;i++)out[i]=parseInt(value.substr(i*2,2),16);
+  return out;
+}
+async function hashPin(pin){
+  if(!window.crypto||!crypto.subtle||!crypto.getRandomValues)throw new Error('Web Crypto unavailable');
+  var salt=crypto.getRandomValues(new Uint8Array(16));
+  var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+  var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:salt,iterations:PIN_ITERATIONS,hash:'SHA-256'},key,256);
+  return 'pbkdf2
+
+/* ================= helpers ================= */
+function prodById(id){return S.products.filter(function(p){return p.id===id})[0]}
+function findTx(id){return S.tx.filter(function(t){return t.id===id})[0]}
+function cartTotal(){return cart.reduce(function(s,c){var p=prodById(c.pid);return s+((p&&p.price||0)*c.qty)},0)}
+
+/* ================= cart actions ================= */
+function addToCart(id){
+  var product=prodById(id);
+  if(!product)return;
+  if(!Number.isSafeInteger(Number(product.price))||Number(product.price)<=0){
+    alert('Harga produk belum valid. Isi harga di Atur → Produk sebelum menambahkan menu.');
+    return;
+  }
+  var it=cart.filter(function(c){return c.pid===id})[0];
+  if(it)it.qty++;else cart.push({pid:id,qty:1,note:''});
+  render();
+}
+function incQty(id){var it=cart.filter(function(c){return c.pid===id})[0];if(it){it.qty++;render()}}
+function decQty(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  it.qty--;if(it.qty<=0)cart=cart.filter(function(c){return c.pid!==id});
+  render();
+}
+function rmItem(id){cart=cart.filter(function(c){return c.pid!==id});render()}
+function noteItem(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  var p=prodById(id)||{name:''};
+  var n=prompt('Catatan untuk '+p.name+'\n(misal: tanpa mie, es sedikit)',it.note||'');
+  if(n!==null){it.note=n.trim();render()}
+}
+function setOrderType(t){orderType=t;render()}
+
+/* ================= navigation ================= */
+function go(t){tab=t;window.scrollTo(0,0);render()}
+
+/* ================= render ================= */
+function render(){
+  S.settings.warung=S.settings.warung||'Kasir';
+  $('#hName').textContent=S.settings.warung;
+  $('#hSub').textContent=new Date().toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  var app=$('#app');
+  if(tab==='kasir')app.innerHTML=renderKasir();
+  else if(tab==='riwayat')app.innerHTML=renderRiwayat();
+  else if(tab==='laporan')app.innerHTML=renderLaporan();
+  else app.innerHTML=renderAtur();
+}
+
+function renderKasir(){
+  var anyZero=S.products.some(function(p){return !p.price});
+  var h='';
+  if(anyZero)h+='<div class="warn">Harga menu belum diisi. Buka <b>Atur → Produk</b> untuk mengisi harga.</div>';
+  h+='<div class="seg">'
+    +'<button class="'+(orderType==='DINE_IN'?'active':'')+'" onclick="setOrderType(\'DINE_IN\')">Makan di sini</button>'
+    +'<button class="'+(orderType==='TAKEAWAY'?'active':'')+'" onclick="setOrderType(\'TAKEAWAY\')">Bawa pulang</button>'
+    +'</div>';
+  h+='<div class="grid">'+S.products.map(function(p){
+    return '<button class="prod" onclick="addToCart(\''+p.id+'\')">'
+      +'<span class="pname">'+esc(p.name)+'</span>'
+      +'<span class="pprice">'+(p.price?money(p.price):'harga belum diisi')+'</span>'
+      +'</button>';
+  }).join('')+'</div>';
+  h+='<div class="card cart"><h3>Pesanan · '+(orderType==='DINE_IN'?'Makan di sini':'Bawa pulang')+'</h3>';
+  if(!cart.length){
+    h+='<p class="muted">Belum ada item. Ketuk menu di atas untuk menambah.</p>';
+  }else{
+    h+=cart.map(function(c){
+      var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+      return '<div class="row">'
+        +'<div class="qty"><button onclick="decQty(\''+c.pid+'\')">−</button><b>'+c.qty+'</b><button onclick="incQty(\''+c.pid+'\')">+</button></div>'
+        +'<div class="item-main"><div class="item-name">'+esc(p.name)+'</div>'
+        +(c.note?'<div class="item-note">Catatan: '+esc(c.note)+'</div>':'')
+        +'<button class="btn" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="noteItem(\''+c.pid+'\')">'+(c.note?'Ubah catatan':'+ Catatan')+'</button>'
+        +'</div>'
+        +'<div class="item-sub">'+money((p.price||0)*c.qty)+'</div>'
+        +'</div>';
+    }).join('');
+    h+='<div class="totalrow"><span>Total</span><span>'+money(cartTotal())+'</span></div>';
+    h+='<button class="btn primary big" onclick="openCheckout()">Bayar · '+money(cartTotal())+'</button>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function renderRiwayat(){
+  var list=S.tx.slice().sort(function(a,b){return b.ts-a.ts});
+  if(histRange==='today'){var k=ymd(new Date());list=list.filter(function(t){return ymd(new Date(t.ts))===k})}
+  else if(histRange==='7'){var f=Date.now()-6*86400000;list=list.filter(function(t){return t.ts>=f})}
+  var h='<div class="seg">'
+    +'<button class="'+(histRange==='today'?'active':'')+'" onclick="setHist(\'today\')">Hari ini</button>'
+    +'<button class="'+(histRange==='7'?'active':'')+'" onclick="setHist(\'7\')">7 hari</button>'
+    +'<button class="'+(histRange==='all'?'active':'')+'" onclick="setHist(\'all\')">Semua</button>'
+    +'</div>';
+  if(!list.length){
+    h+='<div class="card"><p class="muted">Belum ada transaksi pada rentang ini.</p></div>';
+    return h;
+  }
+  h+='<div class="card">'+list.map(function(t){
+    var badge=t.voided?'<span class="badge grey">Batal</span>':(t.method==='CASH'?'<span class="badge ok">Tunai</span>':'<span class="badge">QRIS</span>');
+    return '<div class="txrow '+(t.voided?'void':'')+'" onclick="showReceipt(findTx(\''+t.id+'\'))">'
+      +'<div class="m"><div class="n">'+esc(t.no)+'</div>'
+      +'<div class="d">'+fmtTime(t.ts)+' · '+(t.orderType==='DINE_IN'?'Dine-in':'Bawa pulang')+'</div></div>'
+      +'<div style="text-align:right"><div class="n">'+money(t.total)+'</div><div class="d">'+badge+'</div></div>'
+      +'</div>';
+  }).join('')+'</div>';
+  return h;
+}
+function setHist(v){histRange=v;render()}
+
+function renderLaporan(){
+  if(!repFrom)repFrom=ymd(new Date());
+  if(!repTo)repTo=ymd(new Date());
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var valid=list.filter(function(t){return !t.voided});
+  var omzet=valid.reduce(function(s,t){return s+t.total},0);
+  var tunai=valid.filter(function(t){return t.method==='CASH'}).reduce(function(s,t){return s+t.total},0);
+  var qris=valid.filter(function(t){return t.method==='QRIS'}).reduce(function(s,t){return s+t.total},0);
+  var dine=valid.filter(function(t){return t.orderType==='DINE_IN'}).length;
+  var take=valid.length-dine;
+  var per={};
+  valid.forEach(function(t){t.items.forEach(function(it){
+    var k=it.name;per[k]=per[k]||{qty:0,omzet:0};
+    per[k].qty+=it.qty;per[k].omzet+=it.price*it.qty;
+  })});
+  var rows=Object.keys(per).map(function(k){return {name:k,qty:per[k].qty,omzet:per[k].omzet}})
+    .sort(function(a,b){return b.qty-a.qty});
+
+  var h='<div class="card">'
+    +'<label>Dari</label><input type="date" value="'+repFrom+'" onchange="setRepFrom(this.value)">'
+    +'<label>Sampai</label><input type="date" value="'+repTo+'" onchange="setRepTo(this.value)">'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="quickRange(\'today\')">Hari ini</button>'
+    +'<button class="btn" onclick="quickRange(\'7\')">7 hari</button>'
+    +'<button class="btn" onclick="quickRange(\'month\')">Bulan ini</button>'
+    +'</div></div>';
+
+  h+='<div class="kpi">'
+    +'<div class="box"><div class="lbl">Omzet</div><div class="val">'+money(omzet)+'</div></div>'
+    +'<div class="box"><div class="lbl">Transaksi</div><div class="val">'+valid.length+'</div></div>'
+    +'<div class="box"><div class="lbl">Tunai</div><div class="val">'+money(tunai)+'</div></div>'
+    +'<div class="box"><div class="lbl">QRIS</div><div class="val">'+money(qris)+'</div></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Per produk</h3>';
+  if(!rows.length){
+    h+='<p class="muted">Belum ada penjualan pada rentang ini.</p>';
+  }else{
+    h+='<table><tr><th>Produk</th><th class="r">Qty</th><th class="r">Omzet</th></tr>'
+      +rows.map(function(r){return '<tr><td>'+esc(r.name)+'</td><td class="r">'+r.qty+'</td><td class="r">'+money(r.omzet)+'</td></tr>'}).join('')
+      +'</table>';
+    h+='<p class="muted" style="margin-top:8px">Terlaris: <b>'+esc(rows[0].name)+'</b> ('+rows[0].qty+' porsi/gelas)</p>';
+  }
+  h+='</div>';
+
+  h+='<div class="card"><h3>Rincian</h3>'
+    +'<p class="muted">Dine-in: '+dine+' transaksi · Bawa pulang: '+take+' transaksi</p>'
+    +'<p class="muted">Transaksi dibatalkan: '+(list.length-valid.length)+'</p>'
+    +'<div class="btnrow"><button class="btn" onclick="exportCSV()">Export CSV rentang ini</button></div>'
+    +'</div>';
+  return h;
+}
+function setRepFrom(v){repFrom=v;render()}
+function setRepTo(v){repTo=v;render()}
+function quickRange(k){
+  var d=new Date();
+  if(k==='today'){repFrom=ymd(d);repTo=ymd(d)}
+  else if(k==='7'){var f=new Date(Date.now()-6*86400000);repFrom=ymd(f);repTo=ymd(d)}
+  else{repFrom=ymd(new Date(d.getFullYear(),d.getMonth(),1));repTo=ymd(d)}
+  render();
+}
+
+function renderAtur(){
+  var s=S.settings;
+  var h='<div class="card"><h3>Warung</h3>'
+    +'<label>Nama warung</label><input type="text" id="setWarung" value="'+esc(s.warung)+'">'
+    +'<label>Alamat (opsional)</label><input type="text" id="setAlamat" value="'+esc(s.alamat)+'">'
+    +'<label>Telp/WA (opsional)</label><input type="text" id="setTelp" value="'+esc(s.telepon)+'">'
+    +'<label>Ucapan di struk</label><input type="text" id="setFooter" value="'+esc(s.footer)+'">'
+    +'<div class="btnrow"><button class="btn primary" onclick="saveWarung()">Simpan</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>PIN</h3>'
+    +'<p class="muted">PIN 4 digit untuk mengunci tampilan aplikasi. Ini bukan keamanan setingkat akun/server; data tetap berada di penyimpanan browser perangkat.</p>'
+    +'<label>PIN baru</label><input type="password" inputmode="numeric" maxlength="4" id="setPin" placeholder="••••">'
+    +'<div class="btnrow"><button class="btn" onclick="savePin()">Simpan PIN</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Produk</h3>';
+  h+=S.products.map(function(p){
+    return '<div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)">'
+      +'<input type="text" id="pn_'+p.id+'" value="'+esc(p.name)+'" style="flex:2">'
+      +'<input type="number" inputmode="numeric" id="pp_'+p.id+'" value="'+(p.price||0)+'" style="flex:1;min-width:96px">'
+      +'<button class="btn" style="padding:8px 10px" onclick="delProduct(\''+p.id+'\')">✕</button>'
+      +'</div>';
+  }).join('');
+  h+='<div class="btnrow"><button class="btn primary" onclick="saveProducts()">Simpan Produk</button></div>'
+    +'<hr>'
+    +'<label>Nama produk baru</label><input type="text" id="newName" placeholder="mis. Es Teh Tawar">'
+    +'<label>Harga</label><input type="number" inputmode="numeric" id="newPrice" value="0">'
+    +'<div class="btnrow"><button class="btn" onclick="addProduct()">+ Tambah Produk</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Backup &amp; Restore</h3>'
+    +'<p class="muted">Data hanya tersimpan di HP ini. Backup rutin ke file JSON.</p>'
+    +'<div class="btnrow">'
+    +'<button class="btn primary" onclick="exportJSON()">Backup (JSON)</button>'
+    +'<button class="btn" onclick="document.getElementById(\'impFile\').click()">Restore</button>'
+    +'</div>'
+    +'<input type="file" id="impFile" accept="application/json,.json" style="display:none" onchange="importJSON(this.files[0])">'
+    +'</div>';
+
+  h+='<div class="card"><h3>Tentang</h3>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
+    +'</div>';
+  return h;
+}
+
+/* ================= checkout ================= */
+function openCheckout(){
+  if(!cart.length){alert('Pesanan masih kosong.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||Number(p.price)<=0})){
+    alert('Ada menu dengan harga tidak valid. Periksa Atur → Produk.');
+    return;
+  }
+  var total=cartTotal();
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total transaksi tidak valid.');return}
+  pay={method:'CASH',cash:0,qrisOk:false};
+  var quicks=[total,20000,50000,100000].filter(function(v,i,a){return v>0&&a.indexOf(v)===i});
+  openModal(
+    '<div class="sheet-head"><h2>Pembayaran</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<div class="total-big">'+money(total)+'</div>'
+    +'<div class="seg">'
+    +'<button id="segCash" class="active" onclick="setPay(\'CASH\')">Tunai</button>'
+    +'<button id="segQris" onclick="setPay(\'QRIS\')">QRIS</button>'
+    +'</div>'
+    +'<div id="cashBox">'
+    +'<label>Uang diterima</label>'
+    +'<input id="cashInput" type="number" inputmode="numeric" oninput="onCash(this.value)" placeholder="0">'
+    +'<div class="quick">'+quicks.map(function(v){return '<button onclick="setCash('+v+')">'+money(v)+'</button>'}).join('')+'</div>'
+    +'<div class="change">Kembalian: <b id="changeVal">—</b></div>'
+    +'</div>'
+    +'<div id="qrisBox" class="hidden">'
+    +'<p class="muted">Tunjukkan QRIS warung. Setelah dana dipastikan masuk, centang konfirmasi di bawah.</p>'
+    +'<label class="check"><input type="checkbox" id="qrisChk" onchange="pay.qrisOk=this.checked"> Dana QRIS sudah diterima</label>'
+    +'</div>'
+    +'<button class="btn primary big" style="margin-top:14px" onclick="saveTx()">Simpan Transaksi</button>'
+  );
+  setTimeout(function(){var el=$('#cashInput');if(el)el.focus()},50);
+}
+function setPay(m){
+  pay.method=m;
+  $('#segCash').classList.toggle('active',m==='CASH');
+  $('#segQris').classList.toggle('active',m==='QRIS');
+  $('#cashBox').classList.toggle('hidden',m!=='CASH');
+  $('#qrisBox').classList.toggle('hidden',m!=='QRIS');
+}
+function onCash(v){
+  pay.cash=Number(v||0);
+  var total=cartTotal();
+  var el=$('#changeVal');
+  if(pay.cash>=total)el.textContent=money(pay.cash-total);
+  else el.textContent='—';
+}
+function setCash(v){
+  var el=$('#cashInput');if(!el)return;
+  el.value=v;onCash(v);
+}
+
+function saveTx(){
+  if(savingTx)return;
+  var total=cartTotal();
+  if(!cart.length){alert('Pesanan kosong.');return}
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total harus lebih dari Rp 0 dan berupa angka bulat.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||p.price<=0||!Number.isInteger(c.qty)||c.qty<1})){
+    alert('Item atau harga pesanan tidak valid. Periksa kembali keranjang.');
+    return;
+  }
+  if(pay.method==='CASH'){
+    if(!(pay.cash>=total)){alert('Uang diterima kurang dari total.');return}
+  }else{
+    if(!pay.qrisOk){alert('Centang konfirmasi dana QRIS sudah diterima.');return}
+  }
+  var d=new Date(),dayKey=ymd(d);
+  var seq=S.tx.filter(function(t){return ymd(new Date(t.ts))===dayKey}).length+1;
+  var no='SKH-'+dayKey.replace(/-/g,'')+'-'+String(seq).padStart(3,'0');
+  var items=cart.map(function(c){
+    var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+    return {pid:c.pid,name:p.name,price:p.price||0,qty:c.qty,note:c.note||''};
+  });
+  var tx={
+    id:'t'+rid(),no:no,ts:d.getTime(),items:items,total:total,
+    method:pay.method,
+    cash:pay.method==='CASH'?pay.cash:null,
+    change:pay.method==='CASH'?pay.cash-total:null,
+    orderType:orderType,voided:false,voidedAt:null,voidReason:''
+  };
+  savingTx=true;
+  S.tx.push(tx);
+  if(!save()){
+    S.tx.pop();
+    savingTx=false;
+    return;
+  }
+  savingTx=false;
+  cart=[];closeModalForce();render();
+  showReceipt(tx);
+}
+
+/* ================= receipt ================= */
+function receiptText(tx){
+  var L=[];
+  L.push(S.settings.warung||'Kasir');
+  if(S.settings.alamat)L.push(S.settings.alamat);
+  if(S.settings.telepon)L.push('Telp/WA: '+S.settings.telepon);
+  L.push('--------------------------------');
+  L.push('No  : '+tx.no);
+  L.push('Tgl : '+fmtTime(tx.ts));
+  L.push('Tipe: '+(tx.orderType==='DINE_IN'?'Makan di sini':'Bawa pulang'));
+  L.push('--------------------------------');
+  tx.items.forEach(function(it){
+    L.push(it.name);
+    L.push('  '+it.qty+' x '+money(it.price)+' = '+money(it.price*it.qty));
+    if(it.note)L.push('  * '+it.note);
+  });
+  L.push('--------------------------------');
+  L.push('TOTAL      : '+money(tx.total));
+  if(tx.method==='CASH'){
+    L.push('TUNAI      : '+money(tx.cash));
+    L.push('KEMBALIAN  : '+money(tx.change));
+  }else{
+    L.push('BAYAR      : QRIS (diterima)');
+  }
+  L.push('--------------------------------');
+  L.push(S.settings.footer||'Terima kasih!');
+  if(tx.voided)L.push('*** TRANSAKSI DIBATALKAN ***');
+  return L.join('\n');
+}
+
+function showReceipt(tx){
+  if(!tx)return;
+  currentReceipt=receiptText(tx);
+  var h='<div class="sheet-head"><h2>Struk</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<pre class="receipt">'+esc(currentReceipt)+'</pre>'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="shareReceipt()">Bagikan</button>'
+    +'<button class="btn" onclick="copyReceipt()">Salin</button>'
+    +'<button class="btn" onclick="printReceipt()">Cetak</button>'
+    +'</div>';
+  if(!tx.voided){
+    h+='<button class="btn danger" style="width:100%" onclick="voidTx(\''+tx.id+'\')">Batalkan Transaksi</button>';
+  }
+  h+='<button class="btn primary big" style="margin-top:10px" onclick="closeModalForce()">Selesai</button>';
+  openModal(h);
+}
+
+function shareReceipt(){
+  if(navigator.share){
+    navigator.share({text:currentReceipt}).catch(function(){});
+  }else{
+    copyText(currentReceipt);
+  }
+}
+function copyReceipt(){copyText(currentReceipt)}
+function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){alert('Disalin. Tempel di WhatsApp.')},function(){fallbackCopy(t)});
+  }else fallbackCopy(t);
+}
+function fallbackCopy(t){
+  var ta=document.createElement('textarea');
+  ta.value=t;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');alert('Disalin. Tempel di WhatsApp.')}catch(e){alert('Gagal menyalin')}
+  ta.remove();
+}
+function printReceipt(){
+  $('#printArea').textContent=currentReceipt;
+  window.print();
+}
+
+function voidTx(id){
+  var t=findTx(id);if(!t||t.voided)return;
+  if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
+  var r=prompt('Alasan pembatalan (opsional):','');
+  if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
+  t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
+  alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
+}
+
+/* ================= modal ================= */
+function openModal(html){
+  $('#modal').innerHTML='<div class="backdrop" onclick="closeModal(event)"></div><div class="sheet">'+html+'</div>';
+  $('#modal').classList.remove('hidden');
+}
+function closeModal(e){
+  if(e&&e.target&&!e.target.classList.contains('backdrop'))return;
+  closeModalForce();
+}
+function closeModalForce(){
+  $('#modal').classList.add('hidden');
+  $('#modal').innerHTML='';
+}
+
+/* ================= settings actions ================= */
+function saveWarung(){
+  var previous=Object.assign({},S.settings);
+  S.settings.warung=$('#setWarung').value.trim()||'Kasir';
+  S.settings.alamat=$('#setAlamat').value.trim();
+  S.settings.telepon=$('#setTelp').value.trim();
+  S.settings.footer=$('#setFooter').value.trim();
+  if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
+}
+async function savePin(){
+  var v=$('#setPin').value.trim();
+  if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+}
+function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
+  for(var i=0;i<S.products.length;i++){
+    var p=S.products[i];
+    var n=($('#pn_'+p.id).value||'').trim();
+    var pr=Number($('#pp_'+p.id).value||0);
+    if(!n){alert('Nama produk tidak boleh kosong.');return}
+    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    p.name=n;p.price=Math.round(pr);
+  }
+  if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
+}
+function addProduct(){
+  var n=($('#newName').value||'').trim();
+  var pr=Number($('#newPrice').value||0);
+  if(!n){alert('Isi nama produk.');return}
+  if(pr<0){alert('Harga tidak boleh negatif.');return}
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
+  if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
+}
+function delProduct(id){
+  if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
+  S.products=S.products.filter(function(p){return p.id!==id});
+  cart=cart.filter(function(c){return c.pid!==id});
+  if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
+}
+
+/* ================= backup ================= */
+function exportJSON(){
+  var blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  download(blob,'kasir-kanghendi-backup-'+ymd(new Date())+'.json');
+}
+function exportCSV(){
+  if(!repFrom){alert('Buka tab Laporan dulu untuk memilih rentang.');return}
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var head=['No','Tanggal','Tipe','Metode','Total','Status','Detail'];
+  var rows=list.map(function(t){
+    var det=t.items.map(function(it){return it.name+' x'+it.qty+(it.note?' ('+it.note+')':'')}).join('; ');
+    return [t.no,fmtTime(t.ts),t.orderType,t.method,t.total,t.voided?'BATAL':'OK',det];
+  });
+  var csv=[head].concat(rows).map(function(r){
+    return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(',');
+  }).join('\r\n');
+  download(new Blob([csv],{type:'text/csv;charset=utf-8'}),'transaksi-'+repFrom+'_'+repTo+'.csv');
+}
+function download(blob,name){
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function validateBackup(obj){
+  if(!obj||obj.v!==1||!obj.settings||!Array.isArray(obj.products)||!Array.isArray(obj.tx))return false;
+  if(obj.products.length>500||obj.tx.length>50000)return false;
+  var ids={};
+  for(var i=0;i<obj.products.length;i++){
+    var p=obj.products[i];
+    if(!p||typeof p.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}$/.test(p.id)||ids[p.id])return false;
+    ids[p.id]=true;
+    if(typeof p.name!=='string'||!p.name.trim()||p.name.length>120)return false;
+    if(!Number.isSafeInteger(Number(p.price))||Number(p.price)<0)return false;
+  }
+  var txIds={};
+  for(var j=0;j<obj.tx.length;j++){
+    var t=obj.tx[j];
+    if(!t||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||txIds[t.id])return false;
+    txIds[t.id]=true;
+    if(typeof t.no!=='string'||t.no.length>100||!Number.isFinite(Number(t.ts))||!Array.isArray(t.items))return false;
+    if(!Number.isSafeInteger(Number(t.total))||Number(t.total)<0||!['CASH','QRIS'].includes(t.method)||!['DINE_IN','TAKEAWAY'].includes(t.orderType))return false;
+    if(t.items.length>200)return false;
+    for(var k=0;k<t.items.length;k++){
+      var it=t.items[k];
+      if(!it||typeof it.name!=='string'||it.name.length>120||!Number.isSafeInteger(Number(it.price))||Number(it.price)<0||!Number.isInteger(Number(it.qty))||Number(it.qty)<1||Number(it.qty)>1000)return false;
+      if(it.note!=null&&(typeof it.note!=='string'||it.note.length>500))return false;
+    }
+  }
+  return true;
+}
+function importJSON(file){
+  if(!file)return;
+  if(file.size>10*1024*1024){alert('File backup terlalu besar (maksimum 10 MB).');$('#impFile').value='';return}
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var obj=JSON.parse(r.result);
+      if(!validateBackup(obj))throw new Error('Format atau isi backup tidak valid');
+      if(!confirm('Ganti semua data saat ini dengan isi backup?\\nProduk: '+obj.products.length+' · Transaksi: '+obj.tx.length))return;
+      var previous=S;
+      S=normalize(obj);
+      if(!save()){S=previous;return}
+      render();alert('Backup dipulihkan.');
+    }catch(e){alert('File backup tidak valid atau berisi data yang tidak didukung.')}
+    finally{$('#impFile').value=''}
+  };
+  r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
+  r.readAsText(file);
+}
+async function resetApp(){
+  if(S.settings.pin){
+    var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
+  }
+  if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
+  if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem('skh_last_backup');
+    Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
+    location.reload();
+  }catch(e){alert('Gagal menghapus data browser.')}
+}
+
+/* ================= pin / lock ================= */
+function lockApp(){
+  if(!S.settings.pin){alert('PIN belum aktif. Aktifkan di Atur → PIN.');return}
+  $('#pinInput').value='';$('#pinErr').textContent='';
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+async function unlock(){
+  var throttle=readPinThrottle(),now=Date.now();
+  if(now<throttle.blockedUntil){
+    var seconds=Math.ceil((throttle.blockedUntil-now)/1000);
+    $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
+    return;
+  }
+  var v=$('#pinInput').value;
+  if(await verifyPin(v,S.settings.pin)){
+    if(S.settings.pin.indexOf('pbkdf2$')!==0){
+      try{S.settings.pin=await hashPin(v);if(!save())return}
+      catch(e){$('#pinErr').textContent='Tidak dapat mengamankan PIN di browser ini.';return}
+    }
+    writePinThrottle({fails:0,blockedUntil:0});
+    $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
+  }else{
+    throttle.fails++;
+    if(throttle.fails>=5){
+      throttle.blockedUntil=Date.now()+Math.min(30000*(throttle.fails-4),300000);
+      $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
+    }else{
+      $('#pinErr').textContent='PIN salah ('+throttle.fails+'/5 percobaan)';
+    }
+    writePinThrottle(throttle);
+    $('#pinInput').value='';
+  }
+}
+
+/* ================= auto backup harian ================= */
+function dailyBackup(){
+  try{
+    var today=ymd(new Date());
+    if(localStorage.getItem('skh_last_backup')!==today){
+      localStorage.setItem('skh_backup_'+today,JSON.stringify(S));
+      localStorage.setItem('skh_last_backup',today);
+      var keys=[];
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i);
+        if(k&&k.indexOf('skh_backup_')===0)keys.push(k);
+      }
+      keys.sort();
+      while(keys.length>7){localStorage.removeItem(keys.shift())}
+    }
+  }catch(e){}
+}
+
+/* ================= init ================= */
+load();
+$('#hName').textContent=S.settings.warung;
+render();
+dailyBackup();
+if(S.settings.pin){
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){
+  navigator.serviceWorker.register('./sw.js').catch(function(){});
+}
+</script>
+</body>
+</html>+PIN_ITERATIONS+'
+
+/* ================= helpers ================= */
+function prodById(id){return S.products.filter(function(p){return p.id===id})[0]}
+function findTx(id){return S.tx.filter(function(t){return t.id===id})[0]}
+function cartTotal(){return cart.reduce(function(s,c){var p=prodById(c.pid);return s+((p&&p.price||0)*c.qty)},0)}
+
+/* ================= cart actions ================= */
+function addToCart(id){
+  var product=prodById(id);
+  if(!product)return;
+  if(!Number.isSafeInteger(Number(product.price))||Number(product.price)<=0){
+    alert('Harga produk belum valid. Isi harga di Atur → Produk sebelum menambahkan menu.');
+    return;
+  }
+  var it=cart.filter(function(c){return c.pid===id})[0];
+  if(it)it.qty++;else cart.push({pid:id,qty:1,note:''});
+  render();
+}
+function incQty(id){var it=cart.filter(function(c){return c.pid===id})[0];if(it){it.qty++;render()}}
+function decQty(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  it.qty--;if(it.qty<=0)cart=cart.filter(function(c){return c.pid!==id});
+  render();
+}
+function rmItem(id){cart=cart.filter(function(c){return c.pid!==id});render()}
+function noteItem(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  var p=prodById(id)||{name:''};
+  var n=prompt('Catatan untuk '+p.name+'\n(misal: tanpa mie, es sedikit)',it.note||'');
+  if(n!==null){it.note=n.trim();render()}
+}
+function setOrderType(t){orderType=t;render()}
+
+/* ================= navigation ================= */
+function go(t){tab=t;window.scrollTo(0,0);render()}
+
+/* ================= render ================= */
+function render(){
+  S.settings.warung=S.settings.warung||'Kasir';
+  $('#hName').textContent=S.settings.warung;
+  $('#hSub').textContent=new Date().toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  var app=$('#app');
+  if(tab==='kasir')app.innerHTML=renderKasir();
+  else if(tab==='riwayat')app.innerHTML=renderRiwayat();
+  else if(tab==='laporan')app.innerHTML=renderLaporan();
+  else app.innerHTML=renderAtur();
+}
+
+function renderKasir(){
+  var anyZero=S.products.some(function(p){return !p.price});
+  var h='';
+  if(anyZero)h+='<div class="warn">Harga menu belum diisi. Buka <b>Atur → Produk</b> untuk mengisi harga.</div>';
+  h+='<div class="seg">'
+    +'<button class="'+(orderType==='DINE_IN'?'active':'')+'" onclick="setOrderType(\'DINE_IN\')">Makan di sini</button>'
+    +'<button class="'+(orderType==='TAKEAWAY'?'active':'')+'" onclick="setOrderType(\'TAKEAWAY\')">Bawa pulang</button>'
+    +'</div>';
+  h+='<div class="grid">'+S.products.map(function(p){
+    return '<button class="prod" onclick="addToCart(\''+p.id+'\')">'
+      +'<span class="pname">'+esc(p.name)+'</span>'
+      +'<span class="pprice">'+(p.price?money(p.price):'harga belum diisi')+'</span>'
+      +'</button>';
+  }).join('')+'</div>';
+  h+='<div class="card cart"><h3>Pesanan · '+(orderType==='DINE_IN'?'Makan di sini':'Bawa pulang')+'</h3>';
+  if(!cart.length){
+    h+='<p class="muted">Belum ada item. Ketuk menu di atas untuk menambah.</p>';
+  }else{
+    h+=cart.map(function(c){
+      var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+      return '<div class="row">'
+        +'<div class="qty"><button onclick="decQty(\''+c.pid+'\')">−</button><b>'+c.qty+'</b><button onclick="incQty(\''+c.pid+'\')">+</button></div>'
+        +'<div class="item-main"><div class="item-name">'+esc(p.name)+'</div>'
+        +(c.note?'<div class="item-note">Catatan: '+esc(c.note)+'</div>':'')
+        +'<button class="btn" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="noteItem(\''+c.pid+'\')">'+(c.note?'Ubah catatan':'+ Catatan')+'</button>'
+        +'</div>'
+        +'<div class="item-sub">'+money((p.price||0)*c.qty)+'</div>'
+        +'</div>';
+    }).join('');
+    h+='<div class="totalrow"><span>Total</span><span>'+money(cartTotal())+'</span></div>';
+    h+='<button class="btn primary big" onclick="openCheckout()">Bayar · '+money(cartTotal())+'</button>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function renderRiwayat(){
+  var list=S.tx.slice().sort(function(a,b){return b.ts-a.ts});
+  if(histRange==='today'){var k=ymd(new Date());list=list.filter(function(t){return ymd(new Date(t.ts))===k})}
+  else if(histRange==='7'){var f=Date.now()-6*86400000;list=list.filter(function(t){return t.ts>=f})}
+  var h='<div class="seg">'
+    +'<button class="'+(histRange==='today'?'active':'')+'" onclick="setHist(\'today\')">Hari ini</button>'
+    +'<button class="'+(histRange==='7'?'active':'')+'" onclick="setHist(\'7\')">7 hari</button>'
+    +'<button class="'+(histRange==='all'?'active':'')+'" onclick="setHist(\'all\')">Semua</button>'
+    +'</div>';
+  if(!list.length){
+    h+='<div class="card"><p class="muted">Belum ada transaksi pada rentang ini.</p></div>';
+    return h;
+  }
+  h+='<div class="card">'+list.map(function(t){
+    var badge=t.voided?'<span class="badge grey">Batal</span>':(t.method==='CASH'?'<span class="badge ok">Tunai</span>':'<span class="badge">QRIS</span>');
+    return '<div class="txrow '+(t.voided?'void':'')+'" onclick="showReceipt(findTx(\''+t.id+'\'))">'
+      +'<div class="m"><div class="n">'+esc(t.no)+'</div>'
+      +'<div class="d">'+fmtTime(t.ts)+' · '+(t.orderType==='DINE_IN'?'Dine-in':'Bawa pulang')+'</div></div>'
+      +'<div style="text-align:right"><div class="n">'+money(t.total)+'</div><div class="d">'+badge+'</div></div>'
+      +'</div>';
+  }).join('')+'</div>';
+  return h;
+}
+function setHist(v){histRange=v;render()}
+
+function renderLaporan(){
+  if(!repFrom)repFrom=ymd(new Date());
+  if(!repTo)repTo=ymd(new Date());
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var valid=list.filter(function(t){return !t.voided});
+  var omzet=valid.reduce(function(s,t){return s+t.total},0);
+  var tunai=valid.filter(function(t){return t.method==='CASH'}).reduce(function(s,t){return s+t.total},0);
+  var qris=valid.filter(function(t){return t.method==='QRIS'}).reduce(function(s,t){return s+t.total},0);
+  var dine=valid.filter(function(t){return t.orderType==='DINE_IN'}).length;
+  var take=valid.length-dine;
+  var per={};
+  valid.forEach(function(t){t.items.forEach(function(it){
+    var k=it.name;per[k]=per[k]||{qty:0,omzet:0};
+    per[k].qty+=it.qty;per[k].omzet+=it.price*it.qty;
+  })});
+  var rows=Object.keys(per).map(function(k){return {name:k,qty:per[k].qty,omzet:per[k].omzet}})
+    .sort(function(a,b){return b.qty-a.qty});
+
+  var h='<div class="card">'
+    +'<label>Dari</label><input type="date" value="'+repFrom+'" onchange="setRepFrom(this.value)">'
+    +'<label>Sampai</label><input type="date" value="'+repTo+'" onchange="setRepTo(this.value)">'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="quickRange(\'today\')">Hari ini</button>'
+    +'<button class="btn" onclick="quickRange(\'7\')">7 hari</button>'
+    +'<button class="btn" onclick="quickRange(\'month\')">Bulan ini</button>'
+    +'</div></div>';
+
+  h+='<div class="kpi">'
+    +'<div class="box"><div class="lbl">Omzet</div><div class="val">'+money(omzet)+'</div></div>'
+    +'<div class="box"><div class="lbl">Transaksi</div><div class="val">'+valid.length+'</div></div>'
+    +'<div class="box"><div class="lbl">Tunai</div><div class="val">'+money(tunai)+'</div></div>'
+    +'<div class="box"><div class="lbl">QRIS</div><div class="val">'+money(qris)+'</div></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Per produk</h3>';
+  if(!rows.length){
+    h+='<p class="muted">Belum ada penjualan pada rentang ini.</p>';
+  }else{
+    h+='<table><tr><th>Produk</th><th class="r">Qty</th><th class="r">Omzet</th></tr>'
+      +rows.map(function(r){return '<tr><td>'+esc(r.name)+'</td><td class="r">'+r.qty+'</td><td class="r">'+money(r.omzet)+'</td></tr>'}).join('')
+      +'</table>';
+    h+='<p class="muted" style="margin-top:8px">Terlaris: <b>'+esc(rows[0].name)+'</b> ('+rows[0].qty+' porsi/gelas)</p>';
+  }
+  h+='</div>';
+
+  h+='<div class="card"><h3>Rincian</h3>'
+    +'<p class="muted">Dine-in: '+dine+' transaksi · Bawa pulang: '+take+' transaksi</p>'
+    +'<p class="muted">Transaksi dibatalkan: '+(list.length-valid.length)+'</p>'
+    +'<div class="btnrow"><button class="btn" onclick="exportCSV()">Export CSV rentang ini</button></div>'
+    +'</div>';
+  return h;
+}
+function setRepFrom(v){repFrom=v;render()}
+function setRepTo(v){repTo=v;render()}
+function quickRange(k){
+  var d=new Date();
+  if(k==='today'){repFrom=ymd(d);repTo=ymd(d)}
+  else if(k==='7'){var f=new Date(Date.now()-6*86400000);repFrom=ymd(f);repTo=ymd(d)}
+  else{repFrom=ymd(new Date(d.getFullYear(),d.getMonth(),1));repTo=ymd(d)}
+  render();
+}
+
+function renderAtur(){
+  var s=S.settings;
+  var h='<div class="card"><h3>Warung</h3>'
+    +'<label>Nama warung</label><input type="text" id="setWarung" value="'+esc(s.warung)+'">'
+    +'<label>Alamat (opsional)</label><input type="text" id="setAlamat" value="'+esc(s.alamat)+'">'
+    +'<label>Telp/WA (opsional)</label><input type="text" id="setTelp" value="'+esc(s.telepon)+'">'
+    +'<label>Ucapan di struk</label><input type="text" id="setFooter" value="'+esc(s.footer)+'">'
+    +'<div class="btnrow"><button class="btn primary" onclick="saveWarung()">Simpan</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>PIN</h3>'
+    +'<p class="muted">PIN 4 digit untuk mengunci tampilan aplikasi. Ini bukan keamanan setingkat akun/server; data tetap berada di penyimpanan browser perangkat.</p>'
+    +'<label>PIN baru</label><input type="password" inputmode="numeric" maxlength="4" id="setPin" placeholder="••••">'
+    +'<div class="btnrow"><button class="btn" onclick="savePin()">Simpan PIN</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Produk</h3>';
+  h+=S.products.map(function(p){
+    return '<div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)">'
+      +'<input type="text" id="pn_'+p.id+'" value="'+esc(p.name)+'" style="flex:2">'
+      +'<input type="number" inputmode="numeric" id="pp_'+p.id+'" value="'+(p.price||0)+'" style="flex:1;min-width:96px">'
+      +'<button class="btn" style="padding:8px 10px" onclick="delProduct(\''+p.id+'\')">✕</button>'
+      +'</div>';
+  }).join('');
+  h+='<div class="btnrow"><button class="btn primary" onclick="saveProducts()">Simpan Produk</button></div>'
+    +'<hr>'
+    +'<label>Nama produk baru</label><input type="text" id="newName" placeholder="mis. Es Teh Tawar">'
+    +'<label>Harga</label><input type="number" inputmode="numeric" id="newPrice" value="0">'
+    +'<div class="btnrow"><button class="btn" onclick="addProduct()">+ Tambah Produk</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Backup &amp; Restore</h3>'
+    +'<p class="muted">Data hanya tersimpan di HP ini. Backup rutin ke file JSON.</p>'
+    +'<div class="btnrow">'
+    +'<button class="btn primary" onclick="exportJSON()">Backup (JSON)</button>'
+    +'<button class="btn" onclick="document.getElementById(\'impFile\').click()">Restore</button>'
+    +'</div>'
+    +'<input type="file" id="impFile" accept="application/json,.json" style="display:none" onchange="importJSON(this.files[0])">'
+    +'</div>';
+
+  h+='<div class="card"><h3>Tentang</h3>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
+    +'</div>';
+  return h;
+}
+
+/* ================= checkout ================= */
+function openCheckout(){
+  if(!cart.length){alert('Pesanan masih kosong.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||Number(p.price)<=0})){
+    alert('Ada menu dengan harga tidak valid. Periksa Atur → Produk.');
+    return;
+  }
+  var total=cartTotal();
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total transaksi tidak valid.');return}
+  pay={method:'CASH',cash:0,qrisOk:false};
+  var quicks=[total,20000,50000,100000].filter(function(v,i,a){return v>0&&a.indexOf(v)===i});
+  openModal(
+    '<div class="sheet-head"><h2>Pembayaran</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<div class="total-big">'+money(total)+'</div>'
+    +'<div class="seg">'
+    +'<button id="segCash" class="active" onclick="setPay(\'CASH\')">Tunai</button>'
+    +'<button id="segQris" onclick="setPay(\'QRIS\')">QRIS</button>'
+    +'</div>'
+    +'<div id="cashBox">'
+    +'<label>Uang diterima</label>'
+    +'<input id="cashInput" type="number" inputmode="numeric" oninput="onCash(this.value)" placeholder="0">'
+    +'<div class="quick">'+quicks.map(function(v){return '<button onclick="setCash('+v+')">'+money(v)+'</button>'}).join('')+'</div>'
+    +'<div class="change">Kembalian: <b id="changeVal">—</b></div>'
+    +'</div>'
+    +'<div id="qrisBox" class="hidden">'
+    +'<p class="muted">Tunjukkan QRIS warung. Setelah dana dipastikan masuk, centang konfirmasi di bawah.</p>'
+    +'<label class="check"><input type="checkbox" id="qrisChk" onchange="pay.qrisOk=this.checked"> Dana QRIS sudah diterima</label>'
+    +'</div>'
+    +'<button class="btn primary big" style="margin-top:14px" onclick="saveTx()">Simpan Transaksi</button>'
+  );
+  setTimeout(function(){var el=$('#cashInput');if(el)el.focus()},50);
+}
+function setPay(m){
+  pay.method=m;
+  $('#segCash').classList.toggle('active',m==='CASH');
+  $('#segQris').classList.toggle('active',m==='QRIS');
+  $('#cashBox').classList.toggle('hidden',m!=='CASH');
+  $('#qrisBox').classList.toggle('hidden',m!=='QRIS');
+}
+function onCash(v){
+  pay.cash=Number(v||0);
+  var total=cartTotal();
+  var el=$('#changeVal');
+  if(pay.cash>=total)el.textContent=money(pay.cash-total);
+  else el.textContent='—';
+}
+function setCash(v){
+  var el=$('#cashInput');if(!el)return;
+  el.value=v;onCash(v);
+}
+
+function saveTx(){
+  if(savingTx)return;
+  var total=cartTotal();
+  if(!cart.length){alert('Pesanan kosong.');return}
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total harus lebih dari Rp 0 dan berupa angka bulat.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||p.price<=0||!Number.isInteger(c.qty)||c.qty<1})){
+    alert('Item atau harga pesanan tidak valid. Periksa kembali keranjang.');
+    return;
+  }
+  if(pay.method==='CASH'){
+    if(!(pay.cash>=total)){alert('Uang diterima kurang dari total.');return}
+  }else{
+    if(!pay.qrisOk){alert('Centang konfirmasi dana QRIS sudah diterima.');return}
+  }
+  var d=new Date(),dayKey=ymd(d);
+  var seq=S.tx.filter(function(t){return ymd(new Date(t.ts))===dayKey}).length+1;
+  var no='SKH-'+dayKey.replace(/-/g,'')+'-'+String(seq).padStart(3,'0');
+  var items=cart.map(function(c){
+    var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+    return {pid:c.pid,name:p.name,price:p.price||0,qty:c.qty,note:c.note||''};
+  });
+  var tx={
+    id:'t'+rid(),no:no,ts:d.getTime(),items:items,total:total,
+    method:pay.method,
+    cash:pay.method==='CASH'?pay.cash:null,
+    change:pay.method==='CASH'?pay.cash-total:null,
+    orderType:orderType,voided:false,voidedAt:null,voidReason:''
+  };
+  savingTx=true;
+  S.tx.push(tx);
+  if(!save()){
+    S.tx.pop();
+    savingTx=false;
+    return;
+  }
+  savingTx=false;
+  cart=[];closeModalForce();render();
+  showReceipt(tx);
+}
+
+/* ================= receipt ================= */
+function receiptText(tx){
+  var L=[];
+  L.push(S.settings.warung||'Kasir');
+  if(S.settings.alamat)L.push(S.settings.alamat);
+  if(S.settings.telepon)L.push('Telp/WA: '+S.settings.telepon);
+  L.push('--------------------------------');
+  L.push('No  : '+tx.no);
+  L.push('Tgl : '+fmtTime(tx.ts));
+  L.push('Tipe: '+(tx.orderType==='DINE_IN'?'Makan di sini':'Bawa pulang'));
+  L.push('--------------------------------');
+  tx.items.forEach(function(it){
+    L.push(it.name);
+    L.push('  '+it.qty+' x '+money(it.price)+' = '+money(it.price*it.qty));
+    if(it.note)L.push('  * '+it.note);
+  });
+  L.push('--------------------------------');
+  L.push('TOTAL      : '+money(tx.total));
+  if(tx.method==='CASH'){
+    L.push('TUNAI      : '+money(tx.cash));
+    L.push('KEMBALIAN  : '+money(tx.change));
+  }else{
+    L.push('BAYAR      : QRIS (diterima)');
+  }
+  L.push('--------------------------------');
+  L.push(S.settings.footer||'Terima kasih!');
+  if(tx.voided)L.push('*** TRANSAKSI DIBATALKAN ***');
+  return L.join('\n');
+}
+
+function showReceipt(tx){
+  if(!tx)return;
+  currentReceipt=receiptText(tx);
+  var h='<div class="sheet-head"><h2>Struk</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<pre class="receipt">'+esc(currentReceipt)+'</pre>'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="shareReceipt()">Bagikan</button>'
+    +'<button class="btn" onclick="copyReceipt()">Salin</button>'
+    +'<button class="btn" onclick="printReceipt()">Cetak</button>'
+    +'</div>';
+  if(!tx.voided){
+    h+='<button class="btn danger" style="width:100%" onclick="voidTx(\''+tx.id+'\')">Batalkan Transaksi</button>';
+  }
+  h+='<button class="btn primary big" style="margin-top:10px" onclick="closeModalForce()">Selesai</button>';
+  openModal(h);
+}
+
+function shareReceipt(){
+  if(navigator.share){
+    navigator.share({text:currentReceipt}).catch(function(){});
+  }else{
+    copyText(currentReceipt);
+  }
+}
+function copyReceipt(){copyText(currentReceipt)}
+function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){alert('Disalin. Tempel di WhatsApp.')},function(){fallbackCopy(t)});
+  }else fallbackCopy(t);
+}
+function fallbackCopy(t){
+  var ta=document.createElement('textarea');
+  ta.value=t;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');alert('Disalin. Tempel di WhatsApp.')}catch(e){alert('Gagal menyalin')}
+  ta.remove();
+}
+function printReceipt(){
+  $('#printArea').textContent=currentReceipt;
+  window.print();
+}
+
+function voidTx(id){
+  var t=findTx(id);if(!t||t.voided)return;
+  if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
+  var r=prompt('Alasan pembatalan (opsional):','');
+  if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
+  t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
+  alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
+}
+
+/* ================= modal ================= */
+function openModal(html){
+  $('#modal').innerHTML='<div class="backdrop" onclick="closeModal(event)"></div><div class="sheet">'+html+'</div>';
+  $('#modal').classList.remove('hidden');
+}
+function closeModal(e){
+  if(e&&e.target&&!e.target.classList.contains('backdrop'))return;
+  closeModalForce();
+}
+function closeModalForce(){
+  $('#modal').classList.add('hidden');
+  $('#modal').innerHTML='';
+}
+
+/* ================= settings actions ================= */
+function saveWarung(){
+  var previous=Object.assign({},S.settings);
+  S.settings.warung=$('#setWarung').value.trim()||'Kasir';
+  S.settings.alamat=$('#setAlamat').value.trim();
+  S.settings.telepon=$('#setTelp').value.trim();
+  S.settings.footer=$('#setFooter').value.trim();
+  if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
+}
+async function savePin(){
+  var v=$('#setPin').value.trim();
+  if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+}
+function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
+  for(var i=0;i<S.products.length;i++){
+    var p=S.products[i];
+    var n=($('#pn_'+p.id).value||'').trim();
+    var pr=Number($('#pp_'+p.id).value||0);
+    if(!n){alert('Nama produk tidak boleh kosong.');return}
+    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    p.name=n;p.price=Math.round(pr);
+  }
+  if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
+}
+function addProduct(){
+  var n=($('#newName').value||'').trim();
+  var pr=Number($('#newPrice').value||0);
+  if(!n){alert('Isi nama produk.');return}
+  if(pr<0){alert('Harga tidak boleh negatif.');return}
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
+  if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
+}
+function delProduct(id){
+  if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
+  S.products=S.products.filter(function(p){return p.id!==id});
+  cart=cart.filter(function(c){return c.pid!==id});
+  if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
+}
+
+/* ================= backup ================= */
+function exportJSON(){
+  var blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  download(blob,'kasir-kanghendi-backup-'+ymd(new Date())+'.json');
+}
+function exportCSV(){
+  if(!repFrom){alert('Buka tab Laporan dulu untuk memilih rentang.');return}
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var head=['No','Tanggal','Tipe','Metode','Total','Status','Detail'];
+  var rows=list.map(function(t){
+    var det=t.items.map(function(it){return it.name+' x'+it.qty+(it.note?' ('+it.note+')':'')}).join('; ');
+    return [t.no,fmtTime(t.ts),t.orderType,t.method,t.total,t.voided?'BATAL':'OK',det];
+  });
+  var csv=[head].concat(rows).map(function(r){
+    return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(',');
+  }).join('\r\n');
+  download(new Blob([csv],{type:'text/csv;charset=utf-8'}),'transaksi-'+repFrom+'_'+repTo+'.csv');
+}
+function download(blob,name){
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function validateBackup(obj){
+  if(!obj||obj.v!==1||!obj.settings||!Array.isArray(obj.products)||!Array.isArray(obj.tx))return false;
+  if(obj.products.length>500||obj.tx.length>50000)return false;
+  var ids={};
+  for(var i=0;i<obj.products.length;i++){
+    var p=obj.products[i];
+    if(!p||typeof p.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}$/.test(p.id)||ids[p.id])return false;
+    ids[p.id]=true;
+    if(typeof p.name!=='string'||!p.name.trim()||p.name.length>120)return false;
+    if(!Number.isSafeInteger(Number(p.price))||Number(p.price)<0)return false;
+  }
+  var txIds={};
+  for(var j=0;j<obj.tx.length;j++){
+    var t=obj.tx[j];
+    if(!t||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||txIds[t.id])return false;
+    txIds[t.id]=true;
+    if(typeof t.no!=='string'||t.no.length>100||!Number.isFinite(Number(t.ts))||!Array.isArray(t.items))return false;
+    if(!Number.isSafeInteger(Number(t.total))||Number(t.total)<0||!['CASH','QRIS'].includes(t.method)||!['DINE_IN','TAKEAWAY'].includes(t.orderType))return false;
+    if(t.items.length>200)return false;
+    for(var k=0;k<t.items.length;k++){
+      var it=t.items[k];
+      if(!it||typeof it.name!=='string'||it.name.length>120||!Number.isSafeInteger(Number(it.price))||Number(it.price)<0||!Number.isInteger(Number(it.qty))||Number(it.qty)<1||Number(it.qty)>1000)return false;
+      if(it.note!=null&&(typeof it.note!=='string'||it.note.length>500))return false;
+    }
+  }
+  return true;
+}
+function importJSON(file){
+  if(!file)return;
+  if(file.size>10*1024*1024){alert('File backup terlalu besar (maksimum 10 MB).');$('#impFile').value='';return}
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var obj=JSON.parse(r.result);
+      if(!validateBackup(obj))throw new Error('Format atau isi backup tidak valid');
+      if(!confirm('Ganti semua data saat ini dengan isi backup?\\nProduk: '+obj.products.length+' · Transaksi: '+obj.tx.length))return;
+      var previous=S;
+      S=normalize(obj);
+      if(!save()){S=previous;return}
+      render();alert('Backup dipulihkan.');
+    }catch(e){alert('File backup tidak valid atau berisi data yang tidak didukung.')}
+    finally{$('#impFile').value=''}
+  };
+  r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
+  r.readAsText(file);
+}
+async function resetApp(){
+  if(S.settings.pin){
+    var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
+  }
+  if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
+  if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem('skh_last_backup');
+    Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
+    location.reload();
+  }catch(e){alert('Gagal menghapus data browser.')}
+}
+
+/* ================= pin / lock ================= */
+function lockApp(){
+  if(!S.settings.pin){alert('PIN belum aktif. Aktifkan di Atur → PIN.');return}
+  $('#pinInput').value='';$('#pinErr').textContent='';
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+function unlock(){
+  var now=Date.now();
+  if(now<pinBlockedUntil){
+    var seconds=Math.ceil((pinBlockedUntil-now)/1000);
+    $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
+    return;
+  }
+  var v=$('#pinInput').value;
+  if(v===S.settings.pin){
+    pinFails=0;pinBlockedUntil=0;
+    $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
+  }else{
+    pinFails++;
+    if(pinFails>=5){
+      pinBlockedUntil=Date.now()+Math.min(30000*(pinFails-4),300000);
+      $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
+    }else{
+      $('#pinErr').textContent='PIN salah ('+pinFails+'/5 percobaan)';
+    }
+    $('#pinInput').value='';
+  }
+}
+
+/* ================= auto backup harian ================= */
+function dailyBackup(){
+  try{
+    var today=ymd(new Date());
+    if(localStorage.getItem('skh_last_backup')!==today){
+      localStorage.setItem('skh_backup_'+today,JSON.stringify(S));
+      localStorage.setItem('skh_last_backup',today);
+      var keys=[];
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i);
+        if(k&&k.indexOf('skh_backup_')===0)keys.push(k);
+      }
+      keys.sort();
+      while(keys.length>7){localStorage.removeItem(keys.shift())}
+    }
+  }catch(e){}
+}
+
+/* ================= init ================= */
+load();
+$('#hName').textContent=S.settings.warung;
+render();
+dailyBackup();
+if(S.settings.pin){
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){
+  navigator.serviceWorker.register('./sw.js').catch(function(){});
+}
+</script>
+</body>
+</html>+hex(salt)+'
+
+/* ================= helpers ================= */
+function prodById(id){return S.products.filter(function(p){return p.id===id})[0]}
+function findTx(id){return S.tx.filter(function(t){return t.id===id})[0]}
+function cartTotal(){return cart.reduce(function(s,c){var p=prodById(c.pid);return s+((p&&p.price||0)*c.qty)},0)}
+
+/* ================= cart actions ================= */
+function addToCart(id){
+  var product=prodById(id);
+  if(!product)return;
+  if(!Number.isSafeInteger(Number(product.price))||Number(product.price)<=0){
+    alert('Harga produk belum valid. Isi harga di Atur → Produk sebelum menambahkan menu.');
+    return;
+  }
+  var it=cart.filter(function(c){return c.pid===id})[0];
+  if(it)it.qty++;else cart.push({pid:id,qty:1,note:''});
+  render();
+}
+function incQty(id){var it=cart.filter(function(c){return c.pid===id})[0];if(it){it.qty++;render()}}
+function decQty(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  it.qty--;if(it.qty<=0)cart=cart.filter(function(c){return c.pid!==id});
+  render();
+}
+function rmItem(id){cart=cart.filter(function(c){return c.pid!==id});render()}
+function noteItem(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  var p=prodById(id)||{name:''};
+  var n=prompt('Catatan untuk '+p.name+'\n(misal: tanpa mie, es sedikit)',it.note||'');
+  if(n!==null){it.note=n.trim();render()}
+}
+function setOrderType(t){orderType=t;render()}
+
+/* ================= navigation ================= */
+function go(t){tab=t;window.scrollTo(0,0);render()}
+
+/* ================= render ================= */
+function render(){
+  S.settings.warung=S.settings.warung||'Kasir';
+  $('#hName').textContent=S.settings.warung;
+  $('#hSub').textContent=new Date().toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  var app=$('#app');
+  if(tab==='kasir')app.innerHTML=renderKasir();
+  else if(tab==='riwayat')app.innerHTML=renderRiwayat();
+  else if(tab==='laporan')app.innerHTML=renderLaporan();
+  else app.innerHTML=renderAtur();
+}
+
+function renderKasir(){
+  var anyZero=S.products.some(function(p){return !p.price});
+  var h='';
+  if(anyZero)h+='<div class="warn">Harga menu belum diisi. Buka <b>Atur → Produk</b> untuk mengisi harga.</div>';
+  h+='<div class="seg">'
+    +'<button class="'+(orderType==='DINE_IN'?'active':'')+'" onclick="setOrderType(\'DINE_IN\')">Makan di sini</button>'
+    +'<button class="'+(orderType==='TAKEAWAY'?'active':'')+'" onclick="setOrderType(\'TAKEAWAY\')">Bawa pulang</button>'
+    +'</div>';
+  h+='<div class="grid">'+S.products.map(function(p){
+    return '<button class="prod" onclick="addToCart(\''+p.id+'\')">'
+      +'<span class="pname">'+esc(p.name)+'</span>'
+      +'<span class="pprice">'+(p.price?money(p.price):'harga belum diisi')+'</span>'
+      +'</button>';
+  }).join('')+'</div>';
+  h+='<div class="card cart"><h3>Pesanan · '+(orderType==='DINE_IN'?'Makan di sini':'Bawa pulang')+'</h3>';
+  if(!cart.length){
+    h+='<p class="muted">Belum ada item. Ketuk menu di atas untuk menambah.</p>';
+  }else{
+    h+=cart.map(function(c){
+      var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+      return '<div class="row">'
+        +'<div class="qty"><button onclick="decQty(\''+c.pid+'\')">−</button><b>'+c.qty+'</b><button onclick="incQty(\''+c.pid+'\')">+</button></div>'
+        +'<div class="item-main"><div class="item-name">'+esc(p.name)+'</div>'
+        +(c.note?'<div class="item-note">Catatan: '+esc(c.note)+'</div>':'')
+        +'<button class="btn" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="noteItem(\''+c.pid+'\')">'+(c.note?'Ubah catatan':'+ Catatan')+'</button>'
+        +'</div>'
+        +'<div class="item-sub">'+money((p.price||0)*c.qty)+'</div>'
+        +'</div>';
+    }).join('');
+    h+='<div class="totalrow"><span>Total</span><span>'+money(cartTotal())+'</span></div>';
+    h+='<button class="btn primary big" onclick="openCheckout()">Bayar · '+money(cartTotal())+'</button>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function renderRiwayat(){
+  var list=S.tx.slice().sort(function(a,b){return b.ts-a.ts});
+  if(histRange==='today'){var k=ymd(new Date());list=list.filter(function(t){return ymd(new Date(t.ts))===k})}
+  else if(histRange==='7'){var f=Date.now()-6*86400000;list=list.filter(function(t){return t.ts>=f})}
+  var h='<div class="seg">'
+    +'<button class="'+(histRange==='today'?'active':'')+'" onclick="setHist(\'today\')">Hari ini</button>'
+    +'<button class="'+(histRange==='7'?'active':'')+'" onclick="setHist(\'7\')">7 hari</button>'
+    +'<button class="'+(histRange==='all'?'active':'')+'" onclick="setHist(\'all\')">Semua</button>'
+    +'</div>';
+  if(!list.length){
+    h+='<div class="card"><p class="muted">Belum ada transaksi pada rentang ini.</p></div>';
+    return h;
+  }
+  h+='<div class="card">'+list.map(function(t){
+    var badge=t.voided?'<span class="badge grey">Batal</span>':(t.method==='CASH'?'<span class="badge ok">Tunai</span>':'<span class="badge">QRIS</span>');
+    return '<div class="txrow '+(t.voided?'void':'')+'" onclick="showReceipt(findTx(\''+t.id+'\'))">'
+      +'<div class="m"><div class="n">'+esc(t.no)+'</div>'
+      +'<div class="d">'+fmtTime(t.ts)+' · '+(t.orderType==='DINE_IN'?'Dine-in':'Bawa pulang')+'</div></div>'
+      +'<div style="text-align:right"><div class="n">'+money(t.total)+'</div><div class="d">'+badge+'</div></div>'
+      +'</div>';
+  }).join('')+'</div>';
+  return h;
+}
+function setHist(v){histRange=v;render()}
+
+function renderLaporan(){
+  if(!repFrom)repFrom=ymd(new Date());
+  if(!repTo)repTo=ymd(new Date());
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var valid=list.filter(function(t){return !t.voided});
+  var omzet=valid.reduce(function(s,t){return s+t.total},0);
+  var tunai=valid.filter(function(t){return t.method==='CASH'}).reduce(function(s,t){return s+t.total},0);
+  var qris=valid.filter(function(t){return t.method==='QRIS'}).reduce(function(s,t){return s+t.total},0);
+  var dine=valid.filter(function(t){return t.orderType==='DINE_IN'}).length;
+  var take=valid.length-dine;
+  var per={};
+  valid.forEach(function(t){t.items.forEach(function(it){
+    var k=it.name;per[k]=per[k]||{qty:0,omzet:0};
+    per[k].qty+=it.qty;per[k].omzet+=it.price*it.qty;
+  })});
+  var rows=Object.keys(per).map(function(k){return {name:k,qty:per[k].qty,omzet:per[k].omzet}})
+    .sort(function(a,b){return b.qty-a.qty});
+
+  var h='<div class="card">'
+    +'<label>Dari</label><input type="date" value="'+repFrom+'" onchange="setRepFrom(this.value)">'
+    +'<label>Sampai</label><input type="date" value="'+repTo+'" onchange="setRepTo(this.value)">'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="quickRange(\'today\')">Hari ini</button>'
+    +'<button class="btn" onclick="quickRange(\'7\')">7 hari</button>'
+    +'<button class="btn" onclick="quickRange(\'month\')">Bulan ini</button>'
+    +'</div></div>';
+
+  h+='<div class="kpi">'
+    +'<div class="box"><div class="lbl">Omzet</div><div class="val">'+money(omzet)+'</div></div>'
+    +'<div class="box"><div class="lbl">Transaksi</div><div class="val">'+valid.length+'</div></div>'
+    +'<div class="box"><div class="lbl">Tunai</div><div class="val">'+money(tunai)+'</div></div>'
+    +'<div class="box"><div class="lbl">QRIS</div><div class="val">'+money(qris)+'</div></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Per produk</h3>';
+  if(!rows.length){
+    h+='<p class="muted">Belum ada penjualan pada rentang ini.</p>';
+  }else{
+    h+='<table><tr><th>Produk</th><th class="r">Qty</th><th class="r">Omzet</th></tr>'
+      +rows.map(function(r){return '<tr><td>'+esc(r.name)+'</td><td class="r">'+r.qty+'</td><td class="r">'+money(r.omzet)+'</td></tr>'}).join('')
+      +'</table>';
+    h+='<p class="muted" style="margin-top:8px">Terlaris: <b>'+esc(rows[0].name)+'</b> ('+rows[0].qty+' porsi/gelas)</p>';
+  }
+  h+='</div>';
+
+  h+='<div class="card"><h3>Rincian</h3>'
+    +'<p class="muted">Dine-in: '+dine+' transaksi · Bawa pulang: '+take+' transaksi</p>'
+    +'<p class="muted">Transaksi dibatalkan: '+(list.length-valid.length)+'</p>'
+    +'<div class="btnrow"><button class="btn" onclick="exportCSV()">Export CSV rentang ini</button></div>'
+    +'</div>';
+  return h;
+}
+function setRepFrom(v){repFrom=v;render()}
+function setRepTo(v){repTo=v;render()}
+function quickRange(k){
+  var d=new Date();
+  if(k==='today'){repFrom=ymd(d);repTo=ymd(d)}
+  else if(k==='7'){var f=new Date(Date.now()-6*86400000);repFrom=ymd(f);repTo=ymd(d)}
+  else{repFrom=ymd(new Date(d.getFullYear(),d.getMonth(),1));repTo=ymd(d)}
+  render();
+}
+
+function renderAtur(){
+  var s=S.settings;
+  var h='<div class="card"><h3>Warung</h3>'
+    +'<label>Nama warung</label><input type="text" id="setWarung" value="'+esc(s.warung)+'">'
+    +'<label>Alamat (opsional)</label><input type="text" id="setAlamat" value="'+esc(s.alamat)+'">'
+    +'<label>Telp/WA (opsional)</label><input type="text" id="setTelp" value="'+esc(s.telepon)+'">'
+    +'<label>Ucapan di struk</label><input type="text" id="setFooter" value="'+esc(s.footer)+'">'
+    +'<div class="btnrow"><button class="btn primary" onclick="saveWarung()">Simpan</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>PIN</h3>'
+    +'<p class="muted">PIN 4 digit untuk mengunci tampilan aplikasi. Ini bukan keamanan setingkat akun/server; data tetap berada di penyimpanan browser perangkat.</p>'
+    +'<label>PIN baru</label><input type="password" inputmode="numeric" maxlength="4" id="setPin" placeholder="••••">'
+    +'<div class="btnrow"><button class="btn" onclick="savePin()">Simpan PIN</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Produk</h3>';
+  h+=S.products.map(function(p){
+    return '<div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)">'
+      +'<input type="text" id="pn_'+p.id+'" value="'+esc(p.name)+'" style="flex:2">'
+      +'<input type="number" inputmode="numeric" id="pp_'+p.id+'" value="'+(p.price||0)+'" style="flex:1;min-width:96px">'
+      +'<button class="btn" style="padding:8px 10px" onclick="delProduct(\''+p.id+'\')">✕</button>'
+      +'</div>';
+  }).join('');
+  h+='<div class="btnrow"><button class="btn primary" onclick="saveProducts()">Simpan Produk</button></div>'
+    +'<hr>'
+    +'<label>Nama produk baru</label><input type="text" id="newName" placeholder="mis. Es Teh Tawar">'
+    +'<label>Harga</label><input type="number" inputmode="numeric" id="newPrice" value="0">'
+    +'<div class="btnrow"><button class="btn" onclick="addProduct()">+ Tambah Produk</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Backup &amp; Restore</h3>'
+    +'<p class="muted">Data hanya tersimpan di HP ini. Backup rutin ke file JSON.</p>'
+    +'<div class="btnrow">'
+    +'<button class="btn primary" onclick="exportJSON()">Backup (JSON)</button>'
+    +'<button class="btn" onclick="document.getElementById(\'impFile\').click()">Restore</button>'
+    +'</div>'
+    +'<input type="file" id="impFile" accept="application/json,.json" style="display:none" onchange="importJSON(this.files[0])">'
+    +'</div>';
+
+  h+='<div class="card"><h3>Tentang</h3>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
+    +'</div>';
+  return h;
+}
+
+/* ================= checkout ================= */
+function openCheckout(){
+  if(!cart.length){alert('Pesanan masih kosong.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||Number(p.price)<=0})){
+    alert('Ada menu dengan harga tidak valid. Periksa Atur → Produk.');
+    return;
+  }
+  var total=cartTotal();
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total transaksi tidak valid.');return}
+  pay={method:'CASH',cash:0,qrisOk:false};
+  var quicks=[total,20000,50000,100000].filter(function(v,i,a){return v>0&&a.indexOf(v)===i});
+  openModal(
+    '<div class="sheet-head"><h2>Pembayaran</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<div class="total-big">'+money(total)+'</div>'
+    +'<div class="seg">'
+    +'<button id="segCash" class="active" onclick="setPay(\'CASH\')">Tunai</button>'
+    +'<button id="segQris" onclick="setPay(\'QRIS\')">QRIS</button>'
+    +'</div>'
+    +'<div id="cashBox">'
+    +'<label>Uang diterima</label>'
+    +'<input id="cashInput" type="number" inputmode="numeric" oninput="onCash(this.value)" placeholder="0">'
+    +'<div class="quick">'+quicks.map(function(v){return '<button onclick="setCash('+v+')">'+money(v)+'</button>'}).join('')+'</div>'
+    +'<div class="change">Kembalian: <b id="changeVal">—</b></div>'
+    +'</div>'
+    +'<div id="qrisBox" class="hidden">'
+    +'<p class="muted">Tunjukkan QRIS warung. Setelah dana dipastikan masuk, centang konfirmasi di bawah.</p>'
+    +'<label class="check"><input type="checkbox" id="qrisChk" onchange="pay.qrisOk=this.checked"> Dana QRIS sudah diterima</label>'
+    +'</div>'
+    +'<button class="btn primary big" style="margin-top:14px" onclick="saveTx()">Simpan Transaksi</button>'
+  );
+  setTimeout(function(){var el=$('#cashInput');if(el)el.focus()},50);
+}
+function setPay(m){
+  pay.method=m;
+  $('#segCash').classList.toggle('active',m==='CASH');
+  $('#segQris').classList.toggle('active',m==='QRIS');
+  $('#cashBox').classList.toggle('hidden',m!=='CASH');
+  $('#qrisBox').classList.toggle('hidden',m!=='QRIS');
+}
+function onCash(v){
+  pay.cash=Number(v||0);
+  var total=cartTotal();
+  var el=$('#changeVal');
+  if(pay.cash>=total)el.textContent=money(pay.cash-total);
+  else el.textContent='—';
+}
+function setCash(v){
+  var el=$('#cashInput');if(!el)return;
+  el.value=v;onCash(v);
+}
+
+function saveTx(){
+  if(savingTx)return;
+  var total=cartTotal();
+  if(!cart.length){alert('Pesanan kosong.');return}
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total harus lebih dari Rp 0 dan berupa angka bulat.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||p.price<=0||!Number.isInteger(c.qty)||c.qty<1})){
+    alert('Item atau harga pesanan tidak valid. Periksa kembali keranjang.');
+    return;
+  }
+  if(pay.method==='CASH'){
+    if(!(pay.cash>=total)){alert('Uang diterima kurang dari total.');return}
+  }else{
+    if(!pay.qrisOk){alert('Centang konfirmasi dana QRIS sudah diterima.');return}
+  }
+  var d=new Date(),dayKey=ymd(d);
+  var seq=S.tx.filter(function(t){return ymd(new Date(t.ts))===dayKey}).length+1;
+  var no='SKH-'+dayKey.replace(/-/g,'')+'-'+String(seq).padStart(3,'0');
+  var items=cart.map(function(c){
+    var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+    return {pid:c.pid,name:p.name,price:p.price||0,qty:c.qty,note:c.note||''};
+  });
+  var tx={
+    id:'t'+rid(),no:no,ts:d.getTime(),items:items,total:total,
+    method:pay.method,
+    cash:pay.method==='CASH'?pay.cash:null,
+    change:pay.method==='CASH'?pay.cash-total:null,
+    orderType:orderType,voided:false,voidedAt:null,voidReason:''
+  };
+  savingTx=true;
+  S.tx.push(tx);
+  if(!save()){
+    S.tx.pop();
+    savingTx=false;
+    return;
+  }
+  savingTx=false;
+  cart=[];closeModalForce();render();
+  showReceipt(tx);
+}
+
+/* ================= receipt ================= */
+function receiptText(tx){
+  var L=[];
+  L.push(S.settings.warung||'Kasir');
+  if(S.settings.alamat)L.push(S.settings.alamat);
+  if(S.settings.telepon)L.push('Telp/WA: '+S.settings.telepon);
+  L.push('--------------------------------');
+  L.push('No  : '+tx.no);
+  L.push('Tgl : '+fmtTime(tx.ts));
+  L.push('Tipe: '+(tx.orderType==='DINE_IN'?'Makan di sini':'Bawa pulang'));
+  L.push('--------------------------------');
+  tx.items.forEach(function(it){
+    L.push(it.name);
+    L.push('  '+it.qty+' x '+money(it.price)+' = '+money(it.price*it.qty));
+    if(it.note)L.push('  * '+it.note);
+  });
+  L.push('--------------------------------');
+  L.push('TOTAL      : '+money(tx.total));
+  if(tx.method==='CASH'){
+    L.push('TUNAI      : '+money(tx.cash));
+    L.push('KEMBALIAN  : '+money(tx.change));
+  }else{
+    L.push('BAYAR      : QRIS (diterima)');
+  }
+  L.push('--------------------------------');
+  L.push(S.settings.footer||'Terima kasih!');
+  if(tx.voided)L.push('*** TRANSAKSI DIBATALKAN ***');
+  return L.join('\n');
+}
+
+function showReceipt(tx){
+  if(!tx)return;
+  currentReceipt=receiptText(tx);
+  var h='<div class="sheet-head"><h2>Struk</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<pre class="receipt">'+esc(currentReceipt)+'</pre>'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="shareReceipt()">Bagikan</button>'
+    +'<button class="btn" onclick="copyReceipt()">Salin</button>'
+    +'<button class="btn" onclick="printReceipt()">Cetak</button>'
+    +'</div>';
+  if(!tx.voided){
+    h+='<button class="btn danger" style="width:100%" onclick="voidTx(\''+tx.id+'\')">Batalkan Transaksi</button>';
+  }
+  h+='<button class="btn primary big" style="margin-top:10px" onclick="closeModalForce()">Selesai</button>';
+  openModal(h);
+}
+
+function shareReceipt(){
+  if(navigator.share){
+    navigator.share({text:currentReceipt}).catch(function(){});
+  }else{
+    copyText(currentReceipt);
+  }
+}
+function copyReceipt(){copyText(currentReceipt)}
+function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){alert('Disalin. Tempel di WhatsApp.')},function(){fallbackCopy(t)});
+  }else fallbackCopy(t);
+}
+function fallbackCopy(t){
+  var ta=document.createElement('textarea');
+  ta.value=t;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');alert('Disalin. Tempel di WhatsApp.')}catch(e){alert('Gagal menyalin')}
+  ta.remove();
+}
+function printReceipt(){
+  $('#printArea').textContent=currentReceipt;
+  window.print();
+}
+
+function voidTx(id){
+  var t=findTx(id);if(!t||t.voided)return;
+  if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
+  var r=prompt('Alasan pembatalan (opsional):','');
+  if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
+  t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
+  alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
+}
+
+/* ================= modal ================= */
+function openModal(html){
+  $('#modal').innerHTML='<div class="backdrop" onclick="closeModal(event)"></div><div class="sheet">'+html+'</div>';
+  $('#modal').classList.remove('hidden');
+}
+function closeModal(e){
+  if(e&&e.target&&!e.target.classList.contains('backdrop'))return;
+  closeModalForce();
+}
+function closeModalForce(){
+  $('#modal').classList.add('hidden');
+  $('#modal').innerHTML='';
+}
+
+/* ================= settings actions ================= */
+function saveWarung(){
+  var previous=Object.assign({},S.settings);
+  S.settings.warung=$('#setWarung').value.trim()||'Kasir';
+  S.settings.alamat=$('#setAlamat').value.trim();
+  S.settings.telepon=$('#setTelp').value.trim();
+  S.settings.footer=$('#setFooter').value.trim();
+  if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
+}
+async function savePin(){
+  var v=$('#setPin').value.trim();
+  if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+}
+function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
+  for(var i=0;i<S.products.length;i++){
+    var p=S.products[i];
+    var n=($('#pn_'+p.id).value||'').trim();
+    var pr=Number($('#pp_'+p.id).value||0);
+    if(!n){alert('Nama produk tidak boleh kosong.');return}
+    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    p.name=n;p.price=Math.round(pr);
+  }
+  if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
+}
+function addProduct(){
+  var n=($('#newName').value||'').trim();
+  var pr=Number($('#newPrice').value||0);
+  if(!n){alert('Isi nama produk.');return}
+  if(pr<0){alert('Harga tidak boleh negatif.');return}
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
+  if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
+}
+function delProduct(id){
+  if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
+  S.products=S.products.filter(function(p){return p.id!==id});
+  cart=cart.filter(function(c){return c.pid!==id});
+  if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
+}
+
+/* ================= backup ================= */
+function exportJSON(){
+  var blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  download(blob,'kasir-kanghendi-backup-'+ymd(new Date())+'.json');
+}
+function exportCSV(){
+  if(!repFrom){alert('Buka tab Laporan dulu untuk memilih rentang.');return}
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var head=['No','Tanggal','Tipe','Metode','Total','Status','Detail'];
+  var rows=list.map(function(t){
+    var det=t.items.map(function(it){return it.name+' x'+it.qty+(it.note?' ('+it.note+')':'')}).join('; ');
+    return [t.no,fmtTime(t.ts),t.orderType,t.method,t.total,t.voided?'BATAL':'OK',det];
+  });
+  var csv=[head].concat(rows).map(function(r){
+    return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(',');
+  }).join('\r\n');
+  download(new Blob([csv],{type:'text/csv;charset=utf-8'}),'transaksi-'+repFrom+'_'+repTo+'.csv');
+}
+function download(blob,name){
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function validateBackup(obj){
+  if(!obj||obj.v!==1||!obj.settings||!Array.isArray(obj.products)||!Array.isArray(obj.tx))return false;
+  if(obj.products.length>500||obj.tx.length>50000)return false;
+  var ids={};
+  for(var i=0;i<obj.products.length;i++){
+    var p=obj.products[i];
+    if(!p||typeof p.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}$/.test(p.id)||ids[p.id])return false;
+    ids[p.id]=true;
+    if(typeof p.name!=='string'||!p.name.trim()||p.name.length>120)return false;
+    if(!Number.isSafeInteger(Number(p.price))||Number(p.price)<0)return false;
+  }
+  var txIds={};
+  for(var j=0;j<obj.tx.length;j++){
+    var t=obj.tx[j];
+    if(!t||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||txIds[t.id])return false;
+    txIds[t.id]=true;
+    if(typeof t.no!=='string'||t.no.length>100||!Number.isFinite(Number(t.ts))||!Array.isArray(t.items))return false;
+    if(!Number.isSafeInteger(Number(t.total))||Number(t.total)<0||!['CASH','QRIS'].includes(t.method)||!['DINE_IN','TAKEAWAY'].includes(t.orderType))return false;
+    if(t.items.length>200)return false;
+    for(var k=0;k<t.items.length;k++){
+      var it=t.items[k];
+      if(!it||typeof it.name!=='string'||it.name.length>120||!Number.isSafeInteger(Number(it.price))||Number(it.price)<0||!Number.isInteger(Number(it.qty))||Number(it.qty)<1||Number(it.qty)>1000)return false;
+      if(it.note!=null&&(typeof it.note!=='string'||it.note.length>500))return false;
+    }
+  }
+  return true;
+}
+function importJSON(file){
+  if(!file)return;
+  if(file.size>10*1024*1024){alert('File backup terlalu besar (maksimum 10 MB).');$('#impFile').value='';return}
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var obj=JSON.parse(r.result);
+      if(!validateBackup(obj))throw new Error('Format atau isi backup tidak valid');
+      if(!confirm('Ganti semua data saat ini dengan isi backup?\\nProduk: '+obj.products.length+' · Transaksi: '+obj.tx.length))return;
+      var previous=S;
+      S=normalize(obj);
+      if(!save()){S=previous;return}
+      render();alert('Backup dipulihkan.');
+    }catch(e){alert('File backup tidak valid atau berisi data yang tidak didukung.')}
+    finally{$('#impFile').value=''}
+  };
+  r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
+  r.readAsText(file);
+}
+async function resetApp(){
+  if(S.settings.pin){
+    var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
+  }
+  if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
+  if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem('skh_last_backup');
+    Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
+    location.reload();
+  }catch(e){alert('Gagal menghapus data browser.')}
+}
+
+/* ================= pin / lock ================= */
+function lockApp(){
+  if(!S.settings.pin){alert('PIN belum aktif. Aktifkan di Atur → PIN.');return}
+  $('#pinInput').value='';$('#pinErr').textContent='';
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+function unlock(){
+  var now=Date.now();
+  if(now<pinBlockedUntil){
+    var seconds=Math.ceil((pinBlockedUntil-now)/1000);
+    $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
+    return;
+  }
+  var v=$('#pinInput').value;
+  if(v===S.settings.pin){
+    pinFails=0;pinBlockedUntil=0;
+    $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
+  }else{
+    pinFails++;
+    if(pinFails>=5){
+      pinBlockedUntil=Date.now()+Math.min(30000*(pinFails-4),300000);
+      $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
+    }else{
+      $('#pinErr').textContent='PIN salah ('+pinFails+'/5 percobaan)';
+    }
+    $('#pinInput').value='';
+  }
+}
+
+/* ================= auto backup harian ================= */
+function dailyBackup(){
+  try{
+    var today=ymd(new Date());
+    if(localStorage.getItem('skh_last_backup')!==today){
+      localStorage.setItem('skh_backup_'+today,JSON.stringify(S));
+      localStorage.setItem('skh_last_backup',today);
+      var keys=[];
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i);
+        if(k&&k.indexOf('skh_backup_')===0)keys.push(k);
+      }
+      keys.sort();
+      while(keys.length>7){localStorage.removeItem(keys.shift())}
+    }
+  }catch(e){}
+}
+
+/* ================= init ================= */
+load();
+$('#hName').textContent=S.settings.warung;
+render();
+dailyBackup();
+if(S.settings.pin){
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){
+  navigator.serviceWorker.register('./sw.js').catch(function(){});
+}
+</script>
+</body>
+</html>+hex(bits);
+}
+async function verifyPin(pin,stored){
+  if(typeof stored!=='string')return false;
+  if(stored.indexOf('pbkdf2
+
+/* ================= helpers ================= */
+function prodById(id){return S.products.filter(function(p){return p.id===id})[0]}
+function findTx(id){return S.tx.filter(function(t){return t.id===id})[0]}
+function cartTotal(){return cart.reduce(function(s,c){var p=prodById(c.pid);return s+((p&&p.price||0)*c.qty)},0)}
+
+/* ================= cart actions ================= */
+function addToCart(id){
+  var product=prodById(id);
+  if(!product)return;
+  if(!Number.isSafeInteger(Number(product.price))||Number(product.price)<=0){
+    alert('Harga produk belum valid. Isi harga di Atur → Produk sebelum menambahkan menu.');
+    return;
+  }
+  var it=cart.filter(function(c){return c.pid===id})[0];
+  if(it)it.qty++;else cart.push({pid:id,qty:1,note:''});
+  render();
+}
+function incQty(id){var it=cart.filter(function(c){return c.pid===id})[0];if(it){it.qty++;render()}}
+function decQty(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  it.qty--;if(it.qty<=0)cart=cart.filter(function(c){return c.pid!==id});
+  render();
+}
+function rmItem(id){cart=cart.filter(function(c){return c.pid!==id});render()}
+function noteItem(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  var p=prodById(id)||{name:''};
+  var n=prompt('Catatan untuk '+p.name+'\n(misal: tanpa mie, es sedikit)',it.note||'');
+  if(n!==null){it.note=n.trim();render()}
+}
+function setOrderType(t){orderType=t;render()}
+
+/* ================= navigation ================= */
+function go(t){tab=t;window.scrollTo(0,0);render()}
+
+/* ================= render ================= */
+function render(){
+  S.settings.warung=S.settings.warung||'Kasir';
+  $('#hName').textContent=S.settings.warung;
+  $('#hSub').textContent=new Date().toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  var app=$('#app');
+  if(tab==='kasir')app.innerHTML=renderKasir();
+  else if(tab==='riwayat')app.innerHTML=renderRiwayat();
+  else if(tab==='laporan')app.innerHTML=renderLaporan();
+  else app.innerHTML=renderAtur();
+}
+
+function renderKasir(){
+  var anyZero=S.products.some(function(p){return !p.price});
+  var h='';
+  if(anyZero)h+='<div class="warn">Harga menu belum diisi. Buka <b>Atur → Produk</b> untuk mengisi harga.</div>';
+  h+='<div class="seg">'
+    +'<button class="'+(orderType==='DINE_IN'?'active':'')+'" onclick="setOrderType(\'DINE_IN\')">Makan di sini</button>'
+    +'<button class="'+(orderType==='TAKEAWAY'?'active':'')+'" onclick="setOrderType(\'TAKEAWAY\')">Bawa pulang</button>'
+    +'</div>';
+  h+='<div class="grid">'+S.products.map(function(p){
+    return '<button class="prod" onclick="addToCart(\''+p.id+'\')">'
+      +'<span class="pname">'+esc(p.name)+'</span>'
+      +'<span class="pprice">'+(p.price?money(p.price):'harga belum diisi')+'</span>'
+      +'</button>';
+  }).join('')+'</div>';
+  h+='<div class="card cart"><h3>Pesanan · '+(orderType==='DINE_IN'?'Makan di sini':'Bawa pulang')+'</h3>';
+  if(!cart.length){
+    h+='<p class="muted">Belum ada item. Ketuk menu di atas untuk menambah.</p>';
+  }else{
+    h+=cart.map(function(c){
+      var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+      return '<div class="row">'
+        +'<div class="qty"><button onclick="decQty(\''+c.pid+'\')">−</button><b>'+c.qty+'</b><button onclick="incQty(\''+c.pid+'\')">+</button></div>'
+        +'<div class="item-main"><div class="item-name">'+esc(p.name)+'</div>'
+        +(c.note?'<div class="item-note">Catatan: '+esc(c.note)+'</div>':'')
+        +'<button class="btn" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="noteItem(\''+c.pid+'\')">'+(c.note?'Ubah catatan':'+ Catatan')+'</button>'
+        +'</div>'
+        +'<div class="item-sub">'+money((p.price||0)*c.qty)+'</div>'
+        +'</div>';
+    }).join('');
+    h+='<div class="totalrow"><span>Total</span><span>'+money(cartTotal())+'</span></div>';
+    h+='<button class="btn primary big" onclick="openCheckout()">Bayar · '+money(cartTotal())+'</button>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function renderRiwayat(){
+  var list=S.tx.slice().sort(function(a,b){return b.ts-a.ts});
+  if(histRange==='today'){var k=ymd(new Date());list=list.filter(function(t){return ymd(new Date(t.ts))===k})}
+  else if(histRange==='7'){var f=Date.now()-6*86400000;list=list.filter(function(t){return t.ts>=f})}
+  var h='<div class="seg">'
+    +'<button class="'+(histRange==='today'?'active':'')+'" onclick="setHist(\'today\')">Hari ini</button>'
+    +'<button class="'+(histRange==='7'?'active':'')+'" onclick="setHist(\'7\')">7 hari</button>'
+    +'<button class="'+(histRange==='all'?'active':'')+'" onclick="setHist(\'all\')">Semua</button>'
+    +'</div>';
+  if(!list.length){
+    h+='<div class="card"><p class="muted">Belum ada transaksi pada rentang ini.</p></div>';
+    return h;
+  }
+  h+='<div class="card">'+list.map(function(t){
+    var badge=t.voided?'<span class="badge grey">Batal</span>':(t.method==='CASH'?'<span class="badge ok">Tunai</span>':'<span class="badge">QRIS</span>');
+    return '<div class="txrow '+(t.voided?'void':'')+'" onclick="showReceipt(findTx(\''+t.id+'\'))">'
+      +'<div class="m"><div class="n">'+esc(t.no)+'</div>'
+      +'<div class="d">'+fmtTime(t.ts)+' · '+(t.orderType==='DINE_IN'?'Dine-in':'Bawa pulang')+'</div></div>'
+      +'<div style="text-align:right"><div class="n">'+money(t.total)+'</div><div class="d">'+badge+'</div></div>'
+      +'</div>';
+  }).join('')+'</div>';
+  return h;
+}
+function setHist(v){histRange=v;render()}
+
+function renderLaporan(){
+  if(!repFrom)repFrom=ymd(new Date());
+  if(!repTo)repTo=ymd(new Date());
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var valid=list.filter(function(t){return !t.voided});
+  var omzet=valid.reduce(function(s,t){return s+t.total},0);
+  var tunai=valid.filter(function(t){return t.method==='CASH'}).reduce(function(s,t){return s+t.total},0);
+  var qris=valid.filter(function(t){return t.method==='QRIS'}).reduce(function(s,t){return s+t.total},0);
+  var dine=valid.filter(function(t){return t.orderType==='DINE_IN'}).length;
+  var take=valid.length-dine;
+  var per={};
+  valid.forEach(function(t){t.items.forEach(function(it){
+    var k=it.name;per[k]=per[k]||{qty:0,omzet:0};
+    per[k].qty+=it.qty;per[k].omzet+=it.price*it.qty;
+  })});
+  var rows=Object.keys(per).map(function(k){return {name:k,qty:per[k].qty,omzet:per[k].omzet}})
+    .sort(function(a,b){return b.qty-a.qty});
+
+  var h='<div class="card">'
+    +'<label>Dari</label><input type="date" value="'+repFrom+'" onchange="setRepFrom(this.value)">'
+    +'<label>Sampai</label><input type="date" value="'+repTo+'" onchange="setRepTo(this.value)">'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="quickRange(\'today\')">Hari ini</button>'
+    +'<button class="btn" onclick="quickRange(\'7\')">7 hari</button>'
+    +'<button class="btn" onclick="quickRange(\'month\')">Bulan ini</button>'
+    +'</div></div>';
+
+  h+='<div class="kpi">'
+    +'<div class="box"><div class="lbl">Omzet</div><div class="val">'+money(omzet)+'</div></div>'
+    +'<div class="box"><div class="lbl">Transaksi</div><div class="val">'+valid.length+'</div></div>'
+    +'<div class="box"><div class="lbl">Tunai</div><div class="val">'+money(tunai)+'</div></div>'
+    +'<div class="box"><div class="lbl">QRIS</div><div class="val">'+money(qris)+'</div></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Per produk</h3>';
+  if(!rows.length){
+    h+='<p class="muted">Belum ada penjualan pada rentang ini.</p>';
+  }else{
+    h+='<table><tr><th>Produk</th><th class="r">Qty</th><th class="r">Omzet</th></tr>'
+      +rows.map(function(r){return '<tr><td>'+esc(r.name)+'</td><td class="r">'+r.qty+'</td><td class="r">'+money(r.omzet)+'</td></tr>'}).join('')
+      +'</table>';
+    h+='<p class="muted" style="margin-top:8px">Terlaris: <b>'+esc(rows[0].name)+'</b> ('+rows[0].qty+' porsi/gelas)</p>';
+  }
+  h+='</div>';
+
+  h+='<div class="card"><h3>Rincian</h3>'
+    +'<p class="muted">Dine-in: '+dine+' transaksi · Bawa pulang: '+take+' transaksi</p>'
+    +'<p class="muted">Transaksi dibatalkan: '+(list.length-valid.length)+'</p>'
+    +'<div class="btnrow"><button class="btn" onclick="exportCSV()">Export CSV rentang ini</button></div>'
+    +'</div>';
+  return h;
+}
+function setRepFrom(v){repFrom=v;render()}
+function setRepTo(v){repTo=v;render()}
+function quickRange(k){
+  var d=new Date();
+  if(k==='today'){repFrom=ymd(d);repTo=ymd(d)}
+  else if(k==='7'){var f=new Date(Date.now()-6*86400000);repFrom=ymd(f);repTo=ymd(d)}
+  else{repFrom=ymd(new Date(d.getFullYear(),d.getMonth(),1));repTo=ymd(d)}
+  render();
+}
+
+function renderAtur(){
+  var s=S.settings;
+  var h='<div class="card"><h3>Warung</h3>'
+    +'<label>Nama warung</label><input type="text" id="setWarung" value="'+esc(s.warung)+'">'
+    +'<label>Alamat (opsional)</label><input type="text" id="setAlamat" value="'+esc(s.alamat)+'">'
+    +'<label>Telp/WA (opsional)</label><input type="text" id="setTelp" value="'+esc(s.telepon)+'">'
+    +'<label>Ucapan di struk</label><input type="text" id="setFooter" value="'+esc(s.footer)+'">'
+    +'<div class="btnrow"><button class="btn primary" onclick="saveWarung()">Simpan</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>PIN</h3>'
+    +'<p class="muted">PIN 4 digit untuk mengunci tampilan aplikasi. Ini bukan keamanan setingkat akun/server; data tetap berada di penyimpanan browser perangkat.</p>'
+    +'<label>PIN baru</label><input type="password" inputmode="numeric" maxlength="4" id="setPin" placeholder="••••">'
+    +'<div class="btnrow"><button class="btn" onclick="savePin()">Simpan PIN</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Produk</h3>';
+  h+=S.products.map(function(p){
+    return '<div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)">'
+      +'<input type="text" id="pn_'+p.id+'" value="'+esc(p.name)+'" style="flex:2">'
+      +'<input type="number" inputmode="numeric" id="pp_'+p.id+'" value="'+(p.price||0)+'" style="flex:1;min-width:96px">'
+      +'<button class="btn" style="padding:8px 10px" onclick="delProduct(\''+p.id+'\')">✕</button>'
+      +'</div>';
+  }).join('');
+  h+='<div class="btnrow"><button class="btn primary" onclick="saveProducts()">Simpan Produk</button></div>'
+    +'<hr>'
+    +'<label>Nama produk baru</label><input type="text" id="newName" placeholder="mis. Es Teh Tawar">'
+    +'<label>Harga</label><input type="number" inputmode="numeric" id="newPrice" value="0">'
+    +'<div class="btnrow"><button class="btn" onclick="addProduct()">+ Tambah Produk</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Backup &amp; Restore</h3>'
+    +'<p class="muted">Data hanya tersimpan di HP ini. Backup rutin ke file JSON.</p>'
+    +'<div class="btnrow">'
+    +'<button class="btn primary" onclick="exportJSON()">Backup (JSON)</button>'
+    +'<button class="btn" onclick="document.getElementById(\'impFile\').click()">Restore</button>'
+    +'</div>'
+    +'<input type="file" id="impFile" accept="application/json,.json" style="display:none" onchange="importJSON(this.files[0])">'
+    +'</div>';
+
+  h+='<div class="card"><h3>Tentang</h3>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
+    +'</div>';
+  return h;
+}
+
+/* ================= checkout ================= */
+function openCheckout(){
+  if(!cart.length){alert('Pesanan masih kosong.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||Number(p.price)<=0})){
+    alert('Ada menu dengan harga tidak valid. Periksa Atur → Produk.');
+    return;
+  }
+  var total=cartTotal();
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total transaksi tidak valid.');return}
+  pay={method:'CASH',cash:0,qrisOk:false};
+  var quicks=[total,20000,50000,100000].filter(function(v,i,a){return v>0&&a.indexOf(v)===i});
+  openModal(
+    '<div class="sheet-head"><h2>Pembayaran</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<div class="total-big">'+money(total)+'</div>'
+    +'<div class="seg">'
+    +'<button id="segCash" class="active" onclick="setPay(\'CASH\')">Tunai</button>'
+    +'<button id="segQris" onclick="setPay(\'QRIS\')">QRIS</button>'
+    +'</div>'
+    +'<div id="cashBox">'
+    +'<label>Uang diterima</label>'
+    +'<input id="cashInput" type="number" inputmode="numeric" oninput="onCash(this.value)" placeholder="0">'
+    +'<div class="quick">'+quicks.map(function(v){return '<button onclick="setCash('+v+')">'+money(v)+'</button>'}).join('')+'</div>'
+    +'<div class="change">Kembalian: <b id="changeVal">—</b></div>'
+    +'</div>'
+    +'<div id="qrisBox" class="hidden">'
+    +'<p class="muted">Tunjukkan QRIS warung. Setelah dana dipastikan masuk, centang konfirmasi di bawah.</p>'
+    +'<label class="check"><input type="checkbox" id="qrisChk" onchange="pay.qrisOk=this.checked"> Dana QRIS sudah diterima</label>'
+    +'</div>'
+    +'<button class="btn primary big" style="margin-top:14px" onclick="saveTx()">Simpan Transaksi</button>'
+  );
+  setTimeout(function(){var el=$('#cashInput');if(el)el.focus()},50);
+}
+function setPay(m){
+  pay.method=m;
+  $('#segCash').classList.toggle('active',m==='CASH');
+  $('#segQris').classList.toggle('active',m==='QRIS');
+  $('#cashBox').classList.toggle('hidden',m!=='CASH');
+  $('#qrisBox').classList.toggle('hidden',m!=='QRIS');
+}
+function onCash(v){
+  pay.cash=Number(v||0);
+  var total=cartTotal();
+  var el=$('#changeVal');
+  if(pay.cash>=total)el.textContent=money(pay.cash-total);
+  else el.textContent='—';
+}
+function setCash(v){
+  var el=$('#cashInput');if(!el)return;
+  el.value=v;onCash(v);
+}
+
+function saveTx(){
+  if(savingTx)return;
+  var total=cartTotal();
+  if(!cart.length){alert('Pesanan kosong.');return}
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total harus lebih dari Rp 0 dan berupa angka bulat.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||p.price<=0||!Number.isInteger(c.qty)||c.qty<1})){
+    alert('Item atau harga pesanan tidak valid. Periksa kembali keranjang.');
+    return;
+  }
+  if(pay.method==='CASH'){
+    if(!(pay.cash>=total)){alert('Uang diterima kurang dari total.');return}
+  }else{
+    if(!pay.qrisOk){alert('Centang konfirmasi dana QRIS sudah diterima.');return}
+  }
+  var d=new Date(),dayKey=ymd(d);
+  var seq=S.tx.filter(function(t){return ymd(new Date(t.ts))===dayKey}).length+1;
+  var no='SKH-'+dayKey.replace(/-/g,'')+'-'+String(seq).padStart(3,'0');
+  var items=cart.map(function(c){
+    var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+    return {pid:c.pid,name:p.name,price:p.price||0,qty:c.qty,note:c.note||''};
+  });
+  var tx={
+    id:'t'+rid(),no:no,ts:d.getTime(),items:items,total:total,
+    method:pay.method,
+    cash:pay.method==='CASH'?pay.cash:null,
+    change:pay.method==='CASH'?pay.cash-total:null,
+    orderType:orderType,voided:false,voidedAt:null,voidReason:''
+  };
+  savingTx=true;
+  S.tx.push(tx);
+  if(!save()){
+    S.tx.pop();
+    savingTx=false;
+    return;
+  }
+  savingTx=false;
+  cart=[];closeModalForce();render();
+  showReceipt(tx);
+}
+
+/* ================= receipt ================= */
+function receiptText(tx){
+  var L=[];
+  L.push(S.settings.warung||'Kasir');
+  if(S.settings.alamat)L.push(S.settings.alamat);
+  if(S.settings.telepon)L.push('Telp/WA: '+S.settings.telepon);
+  L.push('--------------------------------');
+  L.push('No  : '+tx.no);
+  L.push('Tgl : '+fmtTime(tx.ts));
+  L.push('Tipe: '+(tx.orderType==='DINE_IN'?'Makan di sini':'Bawa pulang'));
+  L.push('--------------------------------');
+  tx.items.forEach(function(it){
+    L.push(it.name);
+    L.push('  '+it.qty+' x '+money(it.price)+' = '+money(it.price*it.qty));
+    if(it.note)L.push('  * '+it.note);
+  });
+  L.push('--------------------------------');
+  L.push('TOTAL      : '+money(tx.total));
+  if(tx.method==='CASH'){
+    L.push('TUNAI      : '+money(tx.cash));
+    L.push('KEMBALIAN  : '+money(tx.change));
+  }else{
+    L.push('BAYAR      : QRIS (diterima)');
+  }
+  L.push('--------------------------------');
+  L.push(S.settings.footer||'Terima kasih!');
+  if(tx.voided)L.push('*** TRANSAKSI DIBATALKAN ***');
+  return L.join('\n');
+}
+
+function showReceipt(tx){
+  if(!tx)return;
+  currentReceipt=receiptText(tx);
+  var h='<div class="sheet-head"><h2>Struk</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<pre class="receipt">'+esc(currentReceipt)+'</pre>'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="shareReceipt()">Bagikan</button>'
+    +'<button class="btn" onclick="copyReceipt()">Salin</button>'
+    +'<button class="btn" onclick="printReceipt()">Cetak</button>'
+    +'</div>';
+  if(!tx.voided){
+    h+='<button class="btn danger" style="width:100%" onclick="voidTx(\''+tx.id+'\')">Batalkan Transaksi</button>';
+  }
+  h+='<button class="btn primary big" style="margin-top:10px" onclick="closeModalForce()">Selesai</button>';
+  openModal(h);
+}
+
+function shareReceipt(){
+  if(navigator.share){
+    navigator.share({text:currentReceipt}).catch(function(){});
+  }else{
+    copyText(currentReceipt);
+  }
+}
+function copyReceipt(){copyText(currentReceipt)}
+function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){alert('Disalin. Tempel di WhatsApp.')},function(){fallbackCopy(t)});
+  }else fallbackCopy(t);
+}
+function fallbackCopy(t){
+  var ta=document.createElement('textarea');
+  ta.value=t;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');alert('Disalin. Tempel di WhatsApp.')}catch(e){alert('Gagal menyalin')}
+  ta.remove();
+}
+function printReceipt(){
+  $('#printArea').textContent=currentReceipt;
+  window.print();
+}
+
+function voidTx(id){
+  var t=findTx(id);if(!t||t.voided)return;
+  if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
+  var r=prompt('Alasan pembatalan (opsional):','');
+  if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
+  t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
+  alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
+}
+
+/* ================= modal ================= */
+function openModal(html){
+  $('#modal').innerHTML='<div class="backdrop" onclick="closeModal(event)"></div><div class="sheet">'+html+'</div>';
+  $('#modal').classList.remove('hidden');
+}
+function closeModal(e){
+  if(e&&e.target&&!e.target.classList.contains('backdrop'))return;
+  closeModalForce();
+}
+function closeModalForce(){
+  $('#modal').classList.add('hidden');
+  $('#modal').innerHTML='';
+}
+
+/* ================= settings actions ================= */
+function saveWarung(){
+  var previous=Object.assign({},S.settings);
+  S.settings.warung=$('#setWarung').value.trim()||'Kasir';
+  S.settings.alamat=$('#setAlamat').value.trim();
+  S.settings.telepon=$('#setTelp').value.trim();
+  S.settings.footer=$('#setFooter').value.trim();
+  if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
+}
+async function savePin(){
+  var v=$('#setPin').value.trim();
+  if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+}
+function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
+  for(var i=0;i<S.products.length;i++){
+    var p=S.products[i];
+    var n=($('#pn_'+p.id).value||'').trim();
+    var pr=Number($('#pp_'+p.id).value||0);
+    if(!n){alert('Nama produk tidak boleh kosong.');return}
+    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    p.name=n;p.price=Math.round(pr);
+  }
+  if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
+}
+function addProduct(){
+  var n=($('#newName').value||'').trim();
+  var pr=Number($('#newPrice').value||0);
+  if(!n){alert('Isi nama produk.');return}
+  if(pr<0){alert('Harga tidak boleh negatif.');return}
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
+  if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
+}
+function delProduct(id){
+  if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
+  S.products=S.products.filter(function(p){return p.id!==id});
+  cart=cart.filter(function(c){return c.pid!==id});
+  if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
+}
+
+/* ================= backup ================= */
+function exportJSON(){
+  var blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  download(blob,'kasir-kanghendi-backup-'+ymd(new Date())+'.json');
+}
+function exportCSV(){
+  if(!repFrom){alert('Buka tab Laporan dulu untuk memilih rentang.');return}
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var head=['No','Tanggal','Tipe','Metode','Total','Status','Detail'];
+  var rows=list.map(function(t){
+    var det=t.items.map(function(it){return it.name+' x'+it.qty+(it.note?' ('+it.note+')':'')}).join('; ');
+    return [t.no,fmtTime(t.ts),t.orderType,t.method,t.total,t.voided?'BATAL':'OK',det];
+  });
+  var csv=[head].concat(rows).map(function(r){
+    return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(',');
+  }).join('\r\n');
+  download(new Blob([csv],{type:'text/csv;charset=utf-8'}),'transaksi-'+repFrom+'_'+repTo+'.csv');
+}
+function download(blob,name){
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function validateBackup(obj){
+  if(!obj||obj.v!==1||!obj.settings||!Array.isArray(obj.products)||!Array.isArray(obj.tx))return false;
+  if(obj.products.length>500||obj.tx.length>50000)return false;
+  var ids={};
+  for(var i=0;i<obj.products.length;i++){
+    var p=obj.products[i];
+    if(!p||typeof p.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}$/.test(p.id)||ids[p.id])return false;
+    ids[p.id]=true;
+    if(typeof p.name!=='string'||!p.name.trim()||p.name.length>120)return false;
+    if(!Number.isSafeInteger(Number(p.price))||Number(p.price)<0)return false;
+  }
+  var txIds={};
+  for(var j=0;j<obj.tx.length;j++){
+    var t=obj.tx[j];
+    if(!t||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||txIds[t.id])return false;
+    txIds[t.id]=true;
+    if(typeof t.no!=='string'||t.no.length>100||!Number.isFinite(Number(t.ts))||!Array.isArray(t.items))return false;
+    if(!Number.isSafeInteger(Number(t.total))||Number(t.total)<0||!['CASH','QRIS'].includes(t.method)||!['DINE_IN','TAKEAWAY'].includes(t.orderType))return false;
+    if(t.items.length>200)return false;
+    for(var k=0;k<t.items.length;k++){
+      var it=t.items[k];
+      if(!it||typeof it.name!=='string'||it.name.length>120||!Number.isSafeInteger(Number(it.price))||Number(it.price)<0||!Number.isInteger(Number(it.qty))||Number(it.qty)<1||Number(it.qty)>1000)return false;
+      if(it.note!=null&&(typeof it.note!=='string'||it.note.length>500))return false;
+    }
+  }
+  return true;
+}
+function importJSON(file){
+  if(!file)return;
+  if(file.size>10*1024*1024){alert('File backup terlalu besar (maksimum 10 MB).');$('#impFile').value='';return}
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var obj=JSON.parse(r.result);
+      if(!validateBackup(obj))throw new Error('Format atau isi backup tidak valid');
+      if(!confirm('Ganti semua data saat ini dengan isi backup?\\nProduk: '+obj.products.length+' · Transaksi: '+obj.tx.length))return;
+      var previous=S;
+      S=normalize(obj);
+      if(!save()){S=previous;return}
+      render();alert('Backup dipulihkan.');
+    }catch(e){alert('File backup tidak valid atau berisi data yang tidak didukung.')}
+    finally{$('#impFile').value=''}
+  };
+  r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
+  r.readAsText(file);
+}
+async function resetApp(){
+  if(S.settings.pin){
+    var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
+  }
+  if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
+  if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem('skh_last_backup');
+    Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
+    location.reload();
+  }catch(e){alert('Gagal menghapus data browser.')}
+}
+
+/* ================= pin / lock ================= */
+function lockApp(){
+  if(!S.settings.pin){alert('PIN belum aktif. Aktifkan di Atur → PIN.');return}
+  $('#pinInput').value='';$('#pinErr').textContent='';
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+function unlock(){
+  var now=Date.now();
+  if(now<pinBlockedUntil){
+    var seconds=Math.ceil((pinBlockedUntil-now)/1000);
+    $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
+    return;
+  }
+  var v=$('#pinInput').value;
+  if(v===S.settings.pin){
+    pinFails=0;pinBlockedUntil=0;
+    $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
+  }else{
+    pinFails++;
+    if(pinFails>=5){
+      pinBlockedUntil=Date.now()+Math.min(30000*(pinFails-4),300000);
+      $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
+    }else{
+      $('#pinErr').textContent='PIN salah ('+pinFails+'/5 percobaan)';
+    }
+    $('#pinInput').value='';
+  }
+}
+
+/* ================= auto backup harian ================= */
+function dailyBackup(){
+  try{
+    var today=ymd(new Date());
+    if(localStorage.getItem('skh_last_backup')!==today){
+      localStorage.setItem('skh_backup_'+today,JSON.stringify(S));
+      localStorage.setItem('skh_last_backup',today);
+      var keys=[];
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i);
+        if(k&&k.indexOf('skh_backup_')===0)keys.push(k);
+      }
+      keys.sort();
+      while(keys.length>7){localStorage.removeItem(keys.shift())}
+    }
+  }catch(e){}
+}
+
+/* ================= init ================= */
+load();
+$('#hName').textContent=S.settings.warung;
+render();
+dailyBackup();
+if(S.settings.pin){
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){
+  navigator.serviceWorker.register('./sw.js').catch(function(){});
+}
+</script>
+</body>
+</html>)!==0)return pin===stored;
+  var parts=stored.split('
+
+/* ================= helpers ================= */
+function prodById(id){return S.products.filter(function(p){return p.id===id})[0]}
+function findTx(id){return S.tx.filter(function(t){return t.id===id})[0]}
+function cartTotal(){return cart.reduce(function(s,c){var p=prodById(c.pid);return s+((p&&p.price||0)*c.qty)},0)}
+
+/* ================= cart actions ================= */
+function addToCart(id){
+  var product=prodById(id);
+  if(!product)return;
+  if(!Number.isSafeInteger(Number(product.price))||Number(product.price)<=0){
+    alert('Harga produk belum valid. Isi harga di Atur → Produk sebelum menambahkan menu.');
+    return;
+  }
+  var it=cart.filter(function(c){return c.pid===id})[0];
+  if(it)it.qty++;else cart.push({pid:id,qty:1,note:''});
+  render();
+}
+function incQty(id){var it=cart.filter(function(c){return c.pid===id})[0];if(it){it.qty++;render()}}
+function decQty(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  it.qty--;if(it.qty<=0)cart=cart.filter(function(c){return c.pid!==id});
+  render();
+}
+function rmItem(id){cart=cart.filter(function(c){return c.pid!==id});render()}
+function noteItem(id){
+  var it=cart.filter(function(c){return c.pid===id})[0];if(!it)return;
+  var p=prodById(id)||{name:''};
+  var n=prompt('Catatan untuk '+p.name+'\n(misal: tanpa mie, es sedikit)',it.note||'');
+  if(n!==null){it.note=n.trim();render()}
+}
+function setOrderType(t){orderType=t;render()}
+
+/* ================= navigation ================= */
+function go(t){tab=t;window.scrollTo(0,0);render()}
+
+/* ================= render ================= */
+function render(){
+  S.settings.warung=S.settings.warung||'Kasir';
+  $('#hName').textContent=S.settings.warung;
+  $('#hSub').textContent=new Date().toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  var app=$('#app');
+  if(tab==='kasir')app.innerHTML=renderKasir();
+  else if(tab==='riwayat')app.innerHTML=renderRiwayat();
+  else if(tab==='laporan')app.innerHTML=renderLaporan();
+  else app.innerHTML=renderAtur();
+}
+
+function renderKasir(){
+  var anyZero=S.products.some(function(p){return !p.price});
+  var h='';
+  if(anyZero)h+='<div class="warn">Harga menu belum diisi. Buka <b>Atur → Produk</b> untuk mengisi harga.</div>';
+  h+='<div class="seg">'
+    +'<button class="'+(orderType==='DINE_IN'?'active':'')+'" onclick="setOrderType(\'DINE_IN\')">Makan di sini</button>'
+    +'<button class="'+(orderType==='TAKEAWAY'?'active':'')+'" onclick="setOrderType(\'TAKEAWAY\')">Bawa pulang</button>'
+    +'</div>';
+  h+='<div class="grid">'+S.products.map(function(p){
+    return '<button class="prod" onclick="addToCart(\''+p.id+'\')">'
+      +'<span class="pname">'+esc(p.name)+'</span>'
+      +'<span class="pprice">'+(p.price?money(p.price):'harga belum diisi')+'</span>'
+      +'</button>';
+  }).join('')+'</div>';
+  h+='<div class="card cart"><h3>Pesanan · '+(orderType==='DINE_IN'?'Makan di sini':'Bawa pulang')+'</h3>';
+  if(!cart.length){
+    h+='<p class="muted">Belum ada item. Ketuk menu di atas untuk menambah.</p>';
+  }else{
+    h+=cart.map(function(c){
+      var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+      return '<div class="row">'
+        +'<div class="qty"><button onclick="decQty(\''+c.pid+'\')">−</button><b>'+c.qty+'</b><button onclick="incQty(\''+c.pid+'\')">+</button></div>'
+        +'<div class="item-main"><div class="item-name">'+esc(p.name)+'</div>'
+        +(c.note?'<div class="item-note">Catatan: '+esc(c.note)+'</div>':'')
+        +'<button class="btn" style="padding:6px 10px;font-size:12px;margin-top:6px" onclick="noteItem(\''+c.pid+'\')">'+(c.note?'Ubah catatan':'+ Catatan')+'</button>'
+        +'</div>'
+        +'<div class="item-sub">'+money((p.price||0)*c.qty)+'</div>'
+        +'</div>';
+    }).join('');
+    h+='<div class="totalrow"><span>Total</span><span>'+money(cartTotal())+'</span></div>';
+    h+='<button class="btn primary big" onclick="openCheckout()">Bayar · '+money(cartTotal())+'</button>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function renderRiwayat(){
+  var list=S.tx.slice().sort(function(a,b){return b.ts-a.ts});
+  if(histRange==='today'){var k=ymd(new Date());list=list.filter(function(t){return ymd(new Date(t.ts))===k})}
+  else if(histRange==='7'){var f=Date.now()-6*86400000;list=list.filter(function(t){return t.ts>=f})}
+  var h='<div class="seg">'
+    +'<button class="'+(histRange==='today'?'active':'')+'" onclick="setHist(\'today\')">Hari ini</button>'
+    +'<button class="'+(histRange==='7'?'active':'')+'" onclick="setHist(\'7\')">7 hari</button>'
+    +'<button class="'+(histRange==='all'?'active':'')+'" onclick="setHist(\'all\')">Semua</button>'
+    +'</div>';
+  if(!list.length){
+    h+='<div class="card"><p class="muted">Belum ada transaksi pada rentang ini.</p></div>';
+    return h;
+  }
+  h+='<div class="card">'+list.map(function(t){
+    var badge=t.voided?'<span class="badge grey">Batal</span>':(t.method==='CASH'?'<span class="badge ok">Tunai</span>':'<span class="badge">QRIS</span>');
+    return '<div class="txrow '+(t.voided?'void':'')+'" onclick="showReceipt(findTx(\''+t.id+'\'))">'
+      +'<div class="m"><div class="n">'+esc(t.no)+'</div>'
+      +'<div class="d">'+fmtTime(t.ts)+' · '+(t.orderType==='DINE_IN'?'Dine-in':'Bawa pulang')+'</div></div>'
+      +'<div style="text-align:right"><div class="n">'+money(t.total)+'</div><div class="d">'+badge+'</div></div>'
+      +'</div>';
+  }).join('')+'</div>';
+  return h;
+}
+function setHist(v){histRange=v;render()}
+
+function renderLaporan(){
+  if(!repFrom)repFrom=ymd(new Date());
+  if(!repTo)repTo=ymd(new Date());
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var valid=list.filter(function(t){return !t.voided});
+  var omzet=valid.reduce(function(s,t){return s+t.total},0);
+  var tunai=valid.filter(function(t){return t.method==='CASH'}).reduce(function(s,t){return s+t.total},0);
+  var qris=valid.filter(function(t){return t.method==='QRIS'}).reduce(function(s,t){return s+t.total},0);
+  var dine=valid.filter(function(t){return t.orderType==='DINE_IN'}).length;
+  var take=valid.length-dine;
+  var per={};
+  valid.forEach(function(t){t.items.forEach(function(it){
+    var k=it.name;per[k]=per[k]||{qty:0,omzet:0};
+    per[k].qty+=it.qty;per[k].omzet+=it.price*it.qty;
+  })});
+  var rows=Object.keys(per).map(function(k){return {name:k,qty:per[k].qty,omzet:per[k].omzet}})
+    .sort(function(a,b){return b.qty-a.qty});
+
+  var h='<div class="card">'
+    +'<label>Dari</label><input type="date" value="'+repFrom+'" onchange="setRepFrom(this.value)">'
+    +'<label>Sampai</label><input type="date" value="'+repTo+'" onchange="setRepTo(this.value)">'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="quickRange(\'today\')">Hari ini</button>'
+    +'<button class="btn" onclick="quickRange(\'7\')">7 hari</button>'
+    +'<button class="btn" onclick="quickRange(\'month\')">Bulan ini</button>'
+    +'</div></div>';
+
+  h+='<div class="kpi">'
+    +'<div class="box"><div class="lbl">Omzet</div><div class="val">'+money(omzet)+'</div></div>'
+    +'<div class="box"><div class="lbl">Transaksi</div><div class="val">'+valid.length+'</div></div>'
+    +'<div class="box"><div class="lbl">Tunai</div><div class="val">'+money(tunai)+'</div></div>'
+    +'<div class="box"><div class="lbl">QRIS</div><div class="val">'+money(qris)+'</div></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Per produk</h3>';
+  if(!rows.length){
+    h+='<p class="muted">Belum ada penjualan pada rentang ini.</p>';
+  }else{
+    h+='<table><tr><th>Produk</th><th class="r">Qty</th><th class="r">Omzet</th></tr>'
+      +rows.map(function(r){return '<tr><td>'+esc(r.name)+'</td><td class="r">'+r.qty+'</td><td class="r">'+money(r.omzet)+'</td></tr>'}).join('')
+      +'</table>';
+    h+='<p class="muted" style="margin-top:8px">Terlaris: <b>'+esc(rows[0].name)+'</b> ('+rows[0].qty+' porsi/gelas)</p>';
+  }
+  h+='</div>';
+
+  h+='<div class="card"><h3>Rincian</h3>'
+    +'<p class="muted">Dine-in: '+dine+' transaksi · Bawa pulang: '+take+' transaksi</p>'
+    +'<p class="muted">Transaksi dibatalkan: '+(list.length-valid.length)+'</p>'
+    +'<div class="btnrow"><button class="btn" onclick="exportCSV()">Export CSV rentang ini</button></div>'
+    +'</div>';
+  return h;
+}
+function setRepFrom(v){repFrom=v;render()}
+function setRepTo(v){repTo=v;render()}
+function quickRange(k){
+  var d=new Date();
+  if(k==='today'){repFrom=ymd(d);repTo=ymd(d)}
+  else if(k==='7'){var f=new Date(Date.now()-6*86400000);repFrom=ymd(f);repTo=ymd(d)}
+  else{repFrom=ymd(new Date(d.getFullYear(),d.getMonth(),1));repTo=ymd(d)}
+  render();
+}
+
+function renderAtur(){
+  var s=S.settings;
+  var h='<div class="card"><h3>Warung</h3>'
+    +'<label>Nama warung</label><input type="text" id="setWarung" value="'+esc(s.warung)+'">'
+    +'<label>Alamat (opsional)</label><input type="text" id="setAlamat" value="'+esc(s.alamat)+'">'
+    +'<label>Telp/WA (opsional)</label><input type="text" id="setTelp" value="'+esc(s.telepon)+'">'
+    +'<label>Ucapan di struk</label><input type="text" id="setFooter" value="'+esc(s.footer)+'">'
+    +'<div class="btnrow"><button class="btn primary" onclick="saveWarung()">Simpan</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>PIN</h3>'
+    +'<p class="muted">PIN 4 digit untuk mengunci tampilan aplikasi. Ini bukan keamanan setingkat akun/server; data tetap berada di penyimpanan browser perangkat.</p>'
+    +'<label>PIN baru</label><input type="password" inputmode="numeric" maxlength="4" id="setPin" placeholder="••••">'
+    +'<div class="btnrow"><button class="btn" onclick="savePin()">Simpan PIN</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Produk</h3>';
+  h+=S.products.map(function(p){
+    return '<div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)">'
+      +'<input type="text" id="pn_'+p.id+'" value="'+esc(p.name)+'" style="flex:2">'
+      +'<input type="number" inputmode="numeric" id="pp_'+p.id+'" value="'+(p.price||0)+'" style="flex:1;min-width:96px">'
+      +'<button class="btn" style="padding:8px 10px" onclick="delProduct(\''+p.id+'\')">✕</button>'
+      +'</div>';
+  }).join('');
+  h+='<div class="btnrow"><button class="btn primary" onclick="saveProducts()">Simpan Produk</button></div>'
+    +'<hr>'
+    +'<label>Nama produk baru</label><input type="text" id="newName" placeholder="mis. Es Teh Tawar">'
+    +'<label>Harga</label><input type="number" inputmode="numeric" id="newPrice" value="0">'
+    +'<div class="btnrow"><button class="btn" onclick="addProduct()">+ Tambah Produk</button></div>'
+    +'</div>';
+
+  h+='<div class="card"><h3>Backup &amp; Restore</h3>'
+    +'<p class="muted">Data hanya tersimpan di HP ini. Backup rutin ke file JSON.</p>'
+    +'<div class="btnrow">'
+    +'<button class="btn primary" onclick="exportJSON()">Backup (JSON)</button>'
+    +'<button class="btn" onclick="document.getElementById(\'impFile\').click()">Restore</button>'
+    +'</div>'
+    +'<input type="file" id="impFile" accept="application/json,.json" style="display:none" onchange="importJSON(this.files[0])">'
+    +'</div>';
+
+  h+='<div class="card"><h3>Tentang</h3>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
+    +'</div>';
+  return h;
+}
+
+/* ================= checkout ================= */
+function openCheckout(){
+  if(!cart.length){alert('Pesanan masih kosong.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||Number(p.price)<=0})){
+    alert('Ada menu dengan harga tidak valid. Periksa Atur → Produk.');
+    return;
+  }
+  var total=cartTotal();
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total transaksi tidak valid.');return}
+  pay={method:'CASH',cash:0,qrisOk:false};
+  var quicks=[total,20000,50000,100000].filter(function(v,i,a){return v>0&&a.indexOf(v)===i});
+  openModal(
+    '<div class="sheet-head"><h2>Pembayaran</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<div class="total-big">'+money(total)+'</div>'
+    +'<div class="seg">'
+    +'<button id="segCash" class="active" onclick="setPay(\'CASH\')">Tunai</button>'
+    +'<button id="segQris" onclick="setPay(\'QRIS\')">QRIS</button>'
+    +'</div>'
+    +'<div id="cashBox">'
+    +'<label>Uang diterima</label>'
+    +'<input id="cashInput" type="number" inputmode="numeric" oninput="onCash(this.value)" placeholder="0">'
+    +'<div class="quick">'+quicks.map(function(v){return '<button onclick="setCash('+v+')">'+money(v)+'</button>'}).join('')+'</div>'
+    +'<div class="change">Kembalian: <b id="changeVal">—</b></div>'
+    +'</div>'
+    +'<div id="qrisBox" class="hidden">'
+    +'<p class="muted">Tunjukkan QRIS warung. Setelah dana dipastikan masuk, centang konfirmasi di bawah.</p>'
+    +'<label class="check"><input type="checkbox" id="qrisChk" onchange="pay.qrisOk=this.checked"> Dana QRIS sudah diterima</label>'
+    +'</div>'
+    +'<button class="btn primary big" style="margin-top:14px" onclick="saveTx()">Simpan Transaksi</button>'
+  );
+  setTimeout(function(){var el=$('#cashInput');if(el)el.focus()},50);
+}
+function setPay(m){
+  pay.method=m;
+  $('#segCash').classList.toggle('active',m==='CASH');
+  $('#segQris').classList.toggle('active',m==='QRIS');
+  $('#cashBox').classList.toggle('hidden',m!=='CASH');
+  $('#qrisBox').classList.toggle('hidden',m!=='QRIS');
+}
+function onCash(v){
+  pay.cash=Number(v||0);
+  var total=cartTotal();
+  var el=$('#changeVal');
+  if(pay.cash>=total)el.textContent=money(pay.cash-total);
+  else el.textContent='—';
+}
+function setCash(v){
+  var el=$('#cashInput');if(!el)return;
+  el.value=v;onCash(v);
+}
+
+function saveTx(){
+  if(savingTx)return;
+  var total=cartTotal();
+  if(!cart.length){alert('Pesanan kosong.');return}
+  if(!Number.isSafeInteger(total)||total<=0){alert('Total harus lebih dari Rp 0 dan berupa angka bulat.');return}
+  if(cart.some(function(c){var p=prodById(c.pid);return !p||!Number.isSafeInteger(Number(p.price))||p.price<=0||!Number.isInteger(c.qty)||c.qty<1})){
+    alert('Item atau harga pesanan tidak valid. Periksa kembali keranjang.');
+    return;
+  }
+  if(pay.method==='CASH'){
+    if(!(pay.cash>=total)){alert('Uang diterima kurang dari total.');return}
+  }else{
+    if(!pay.qrisOk){alert('Centang konfirmasi dana QRIS sudah diterima.');return}
+  }
+  var d=new Date(),dayKey=ymd(d);
+  var seq=S.tx.filter(function(t){return ymd(new Date(t.ts))===dayKey}).length+1;
+  var no='SKH-'+dayKey.replace(/-/g,'')+'-'+String(seq).padStart(3,'0');
+  var items=cart.map(function(c){
+    var p=prodById(c.pid)||{name:'(menu dihapus)',price:0};
+    return {pid:c.pid,name:p.name,price:p.price||0,qty:c.qty,note:c.note||''};
+  });
+  var tx={
+    id:'t'+rid(),no:no,ts:d.getTime(),items:items,total:total,
+    method:pay.method,
+    cash:pay.method==='CASH'?pay.cash:null,
+    change:pay.method==='CASH'?pay.cash-total:null,
+    orderType:orderType,voided:false,voidedAt:null,voidReason:''
+  };
+  savingTx=true;
+  S.tx.push(tx);
+  if(!save()){
+    S.tx.pop();
+    savingTx=false;
+    return;
+  }
+  savingTx=false;
+  cart=[];closeModalForce();render();
+  showReceipt(tx);
+}
+
+/* ================= receipt ================= */
+function receiptText(tx){
+  var L=[];
+  L.push(S.settings.warung||'Kasir');
+  if(S.settings.alamat)L.push(S.settings.alamat);
+  if(S.settings.telepon)L.push('Telp/WA: '+S.settings.telepon);
+  L.push('--------------------------------');
+  L.push('No  : '+tx.no);
+  L.push('Tgl : '+fmtTime(tx.ts));
+  L.push('Tipe: '+(tx.orderType==='DINE_IN'?'Makan di sini':'Bawa pulang'));
+  L.push('--------------------------------');
+  tx.items.forEach(function(it){
+    L.push(it.name);
+    L.push('  '+it.qty+' x '+money(it.price)+' = '+money(it.price*it.qty));
+    if(it.note)L.push('  * '+it.note);
+  });
+  L.push('--------------------------------');
+  L.push('TOTAL      : '+money(tx.total));
+  if(tx.method==='CASH'){
+    L.push('TUNAI      : '+money(tx.cash));
+    L.push('KEMBALIAN  : '+money(tx.change));
+  }else{
+    L.push('BAYAR      : QRIS (diterima)');
+  }
+  L.push('--------------------------------');
+  L.push(S.settings.footer||'Terima kasih!');
+  if(tx.voided)L.push('*** TRANSAKSI DIBATALKAN ***');
+  return L.join('\n');
+}
+
+function showReceipt(tx){
+  if(!tx)return;
+  currentReceipt=receiptText(tx);
+  var h='<div class="sheet-head"><h2>Struk</h2><button class="x" onclick="closeModalForce()">✕</button></div>'
+    +'<pre class="receipt">'+esc(currentReceipt)+'</pre>'
+    +'<div class="btnrow">'
+    +'<button class="btn" onclick="shareReceipt()">Bagikan</button>'
+    +'<button class="btn" onclick="copyReceipt()">Salin</button>'
+    +'<button class="btn" onclick="printReceipt()">Cetak</button>'
+    +'</div>';
+  if(!tx.voided){
+    h+='<button class="btn danger" style="width:100%" onclick="voidTx(\''+tx.id+'\')">Batalkan Transaksi</button>';
+  }
+  h+='<button class="btn primary big" style="margin-top:10px" onclick="closeModalForce()">Selesai</button>';
+  openModal(h);
+}
+
+function shareReceipt(){
+  if(navigator.share){
+    navigator.share({text:currentReceipt}).catch(function(){});
+  }else{
+    copyText(currentReceipt);
+  }
+}
+function copyReceipt(){copyText(currentReceipt)}
+function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){alert('Disalin. Tempel di WhatsApp.')},function(){fallbackCopy(t)});
+  }else fallbackCopy(t);
+}
+function fallbackCopy(t){
+  var ta=document.createElement('textarea');
+  ta.value=t;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');alert('Disalin. Tempel di WhatsApp.')}catch(e){alert('Gagal menyalin')}
+  ta.remove();
+}
+function printReceipt(){
+  $('#printArea').textContent=currentReceipt;
+  window.print();
+}
+
+function voidTx(id){
+  var t=findTx(id);if(!t||t.voided)return;
+  if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
+  var r=prompt('Alasan pembatalan (opsional):','');
+  if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
+  t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
+  alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
+}
+
+/* ================= modal ================= */
+function openModal(html){
+  $('#modal').innerHTML='<div class="backdrop" onclick="closeModal(event)"></div><div class="sheet">'+html+'</div>';
+  $('#modal').classList.remove('hidden');
+}
+function closeModal(e){
+  if(e&&e.target&&!e.target.classList.contains('backdrop'))return;
+  closeModalForce();
+}
+function closeModalForce(){
+  $('#modal').classList.add('hidden');
+  $('#modal').innerHTML='';
+}
+
+/* ================= settings actions ================= */
+function saveWarung(){
+  var previous=Object.assign({},S.settings);
+  S.settings.warung=$('#setWarung').value.trim()||'Kasir';
+  S.settings.alamat=$('#setAlamat').value.trim();
+  S.settings.telepon=$('#setTelp').value.trim();
+  S.settings.footer=$('#setFooter').value.trim();
+  if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
+}
+async function savePin(){
+  var v=$('#setPin').value.trim();
+  if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+}
+function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
+  for(var i=0;i<S.products.length;i++){
+    var p=S.products[i];
+    var n=($('#pn_'+p.id).value||'').trim();
+    var pr=Number($('#pp_'+p.id).value||0);
+    if(!n){alert('Nama produk tidak boleh kosong.');return}
+    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    p.name=n;p.price=Math.round(pr);
+  }
+  if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
+}
+function addProduct(){
+  var n=($('#newName').value||'').trim();
+  var pr=Number($('#newPrice').value||0);
+  if(!n){alert('Isi nama produk.');return}
+  if(pr<0){alert('Harga tidak boleh negatif.');return}
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
+  if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
+}
+function delProduct(id){
+  if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
+  S.products=S.products.filter(function(p){return p.id!==id});
+  cart=cart.filter(function(c){return c.pid!==id});
+  if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
+}
+
+/* ================= backup ================= */
+function exportJSON(){
+  var blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  download(blob,'kasir-kanghendi-backup-'+ymd(new Date())+'.json');
+}
+function exportCSV(){
+  if(!repFrom){alert('Buka tab Laporan dulu untuk memilih rentang.');return}
+  var from=new Date(repFrom+'T00:00:00').getTime();
+  var to=new Date(repTo+'T23:59:59.999').getTime();
+  var list=S.tx.filter(function(t){return t.ts>=from&&t.ts<=to});
+  var head=['No','Tanggal','Tipe','Metode','Total','Status','Detail'];
+  var rows=list.map(function(t){
+    var det=t.items.map(function(it){return it.name+' x'+it.qty+(it.note?' ('+it.note+')':'')}).join('; ');
+    return [t.no,fmtTime(t.ts),t.orderType,t.method,t.total,t.voided?'BATAL':'OK',det];
+  });
+  var csv=[head].concat(rows).map(function(r){
+    return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(',');
+  }).join('\r\n');
+  download(new Blob([csv],{type:'text/csv;charset=utf-8'}),'transaksi-'+repFrom+'_'+repTo+'.csv');
+}
+function download(blob,name){
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function validateBackup(obj){
+  if(!obj||obj.v!==1||!obj.settings||!Array.isArray(obj.products)||!Array.isArray(obj.tx))return false;
+  if(obj.products.length>500||obj.tx.length>50000)return false;
+  var ids={};
+  for(var i=0;i<obj.products.length;i++){
+    var p=obj.products[i];
+    if(!p||typeof p.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}$/.test(p.id)||ids[p.id])return false;
+    ids[p.id]=true;
+    if(typeof p.name!=='string'||!p.name.trim()||p.name.length>120)return false;
+    if(!Number.isSafeInteger(Number(p.price))||Number(p.price)<0)return false;
+  }
+  var txIds={};
+  for(var j=0;j<obj.tx.length;j++){
+    var t=obj.tx[j];
+    if(!t||typeof t.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(t.id)||txIds[t.id])return false;
+    txIds[t.id]=true;
+    if(typeof t.no!=='string'||t.no.length>100||!Number.isFinite(Number(t.ts))||!Array.isArray(t.items))return false;
+    if(!Number.isSafeInteger(Number(t.total))||Number(t.total)<0||!['CASH','QRIS'].includes(t.method)||!['DINE_IN','TAKEAWAY'].includes(t.orderType))return false;
+    if(t.items.length>200)return false;
+    for(var k=0;k<t.items.length;k++){
+      var it=t.items[k];
+      if(!it||typeof it.name!=='string'||it.name.length>120||!Number.isSafeInteger(Number(it.price))||Number(it.price)<0||!Number.isInteger(Number(it.qty))||Number(it.qty)<1||Number(it.qty)>1000)return false;
+      if(it.note!=null&&(typeof it.note!=='string'||it.note.length>500))return false;
+    }
+  }
+  return true;
+}
+function importJSON(file){
+  if(!file)return;
+  if(file.size>10*1024*1024){alert('File backup terlalu besar (maksimum 10 MB).');$('#impFile').value='';return}
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var obj=JSON.parse(r.result);
+      if(!validateBackup(obj))throw new Error('Format atau isi backup tidak valid');
+      if(!confirm('Ganti semua data saat ini dengan isi backup?\\nProduk: '+obj.products.length+' · Transaksi: '+obj.tx.length))return;
+      var previous=S;
+      S=normalize(obj);
+      if(!save()){S=previous;return}
+      render();alert('Backup dipulihkan.');
+    }catch(e){alert('File backup tidak valid atau berisi data yang tidak didukung.')}
+    finally{$('#impFile').value=''}
+  };
+  r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
+  r.readAsText(file);
+}
+async function resetApp(){
+  if(S.settings.pin){
+    var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
+  }
+  if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
+  if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
+  try{
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem('skh_last_backup');
+    Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
+    location.reload();
+  }catch(e){alert('Gagal menghapus data browser.')}
+}
+
+/* ================= pin / lock ================= */
+function lockApp(){
+  if(!S.settings.pin){alert('PIN belum aktif. Aktifkan di Atur → PIN.');return}
+  $('#pinInput').value='';$('#pinErr').textContent='';
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+function unlock(){
+  var now=Date.now();
+  if(now<pinBlockedUntil){
+    var seconds=Math.ceil((pinBlockedUntil-now)/1000);
+    $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
+    return;
+  }
+  var v=$('#pinInput').value;
+  if(v===S.settings.pin){
+    pinFails=0;pinBlockedUntil=0;
+    $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
+  }else{
+    pinFails++;
+    if(pinFails>=5){
+      pinBlockedUntil=Date.now()+Math.min(30000*(pinFails-4),300000);
+      $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
+    }else{
+      $('#pinErr').textContent='PIN salah ('+pinFails+'/5 percobaan)';
+    }
+    $('#pinInput').value='';
+  }
+}
+
+/* ================= auto backup harian ================= */
+function dailyBackup(){
+  try{
+    var today=ymd(new Date());
+    if(localStorage.getItem('skh_last_backup')!==today){
+      localStorage.setItem('skh_backup_'+today,JSON.stringify(S));
+      localStorage.setItem('skh_last_backup',today);
+      var keys=[];
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i);
+        if(k&&k.indexOf('skh_backup_')===0)keys.push(k);
+      }
+      keys.sort();
+      while(keys.length>7){localStorage.removeItem(keys.shift())}
+    }
+  }catch(e){}
+}
+
+/* ================= init ================= */
+load();
+$('#hName').textContent=S.settings.warung;
+render();
+dailyBackup();
+if(S.settings.pin){
+  $('#lock').classList.remove('hidden');
+  setTimeout(function(){$('#pinInput').focus()},100);
+}
+if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){
+  navigator.serviceWorker.register('./sw.js').catch(function(){});
+}
+</script>
+</body>
+</html>);
+  if(parts.length!==4)return false;
+  var iterations=Number(parts[1]);
+  if(!Number.isInteger(iterations)||iterations<100000||iterations>1000000)return false;
+  if(!window.crypto||!crypto.subtle)return false;
+  try{
+    var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+    var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:unhex(parts[2]),iterations:iterations,hash:'SHA-256'},key,256);
+    var actual=hex(bits),expected=parts[3];
+    if(actual.length!==expected.length)return false;
+    var diff=0;for(var i=0;i<actual.length;i++)diff|=actual.charCodeAt(i)^expected.charCodeAt(i);
+    return diff===0;
+  }catch(e){return false}
+}
 var savingTx=false;
 
 /* ================= helpers ================= */
@@ -615,10 +3741,15 @@ function saveWarung(){
   if(save()){render();alert('Pengaturan warung disimpan.');}
   else S.settings=previous;
 }
-function savePin(){
+async function savePin(){
   var v=$('#setPin').value.trim();
   if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
-  var old=S.settings.pin;S.settings.pin=v;if(!save()){S.settings.pin=old;return}alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Browser tidak mendukung penyimpanan PIN yang lebih aman. Gunakan aplikasi melalui HTTPS pada browser modern.');S.settings.pin=old;return}
+  if(!save()){S.settings.pin=old;return}
+  try{localStorage.removeItem(PIN_LOCK_KEY)}catch(e){}
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
 }
 function saveProducts(){
   var previousProducts=S.products.map(function(p){return Object.assign({},p)});
@@ -725,10 +3856,10 @@ function importJSON(file){
   r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
   r.readAsText(file);
 }
-function resetApp(){
+async function resetApp(){
   if(S.settings.pin){
     var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
-    if(entered!==S.settings.pin){alert('PIN salah. Data tidak dihapus.');return}
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
   }
   if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
   if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;

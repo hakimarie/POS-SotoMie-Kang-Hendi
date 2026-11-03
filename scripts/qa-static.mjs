@@ -33,8 +33,8 @@ const appChecks = [
   ['backup and restore controls', /backup/i.test(html) && /restore/i.test(html)],
   ['PIN hashing implementation', html.includes('async function hashPin(')],
   ['PIN verification implementation', html.includes('async function verifyPin(')],
-  ['persistent PIN throttling', /function readPinThrottle\s*\\(/.test(html) && /function writePinThrottle\s*\\(/.test(html)],
-  ['service worker registration', /serviceWorker/.test(html)]
+  ['persistent PIN throttling', html.includes('function readPinThrottle(') && html.includes('function writePinThrottle(')],
+  ['service worker registration and app-shell cache', /serviceWorker/.test(html) && serviceWorker.includes('APP_SHELL') && serviceWorker.includes('CACHE_NAME')],
 ];
 for (const [label, ok] of appChecks) assert(ok, label);
 

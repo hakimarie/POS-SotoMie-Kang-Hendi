@@ -637,9 +637,18 @@ function saveProducts(){
   for(var i=0;i<S.products.length;i++){
     var p=S.products[i];
     var n=($('#pn_'+p.id).value||'').trim();
-    var pr=Number($('#pp_'+p.id).value||0);
-    if(!n){alert('Nama produk tidak boleh kosong.');return}
-    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    var rawPrice=$('#pp_'+p.id).value;
+    var pr=Number(rawPrice);
+    if(!n){
+      S.products=previousProducts;
+      alert('Nama produk tidak boleh kosong.');
+      return;
+    }
+    if(rawPrice.trim()===''||!Number.isFinite(pr)||pr<0||!Number.isSafeInteger(Math.round(pr))){
+      S.products=previousProducts;
+      alert('Harga produk harus berupa angka nol atau lebih.');
+      return;
+    }
     p.name=n;p.price=Math.round(pr);
   }
   if(save()){render();alert('Produk disimpan.');}

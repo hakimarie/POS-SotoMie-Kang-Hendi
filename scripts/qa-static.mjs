@@ -16,7 +16,7 @@ function assert(condition, message) {
   }
 }
 
-const scripts = [...html.matchAll(/<script(?:\\s[^>]*)?>([\\s\\S]*?)<\\/script>/gi)]
+const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
   .map(match => match[1])
   .filter(source => source.trim().length > 0);
 
@@ -31,9 +31,9 @@ const appChecks = [
   ['QRIS payment flow', /qris/i.test(html)],
   ['transaction void flow', /void/i.test(html)],
   ['backup and restore controls', /backup/i.test(html) && /restore/i.test(html)],
-  ['PIN hashing implementation', /async function hashPin\\s*\\(/.test(html)],
-  ['PIN verification implementation', /async function verifyPin\\s*\\(/.test(html)],
-  ['persistent PIN throttling', /function readPinThrottle\\s*\\(/.test(html) && /function writePinThrottle\\s*\\(/.test(html)],
+  ['PIN hashing implementation', /async function hashPin\s*\\(/.test(html)],
+  ['PIN verification implementation', /async function verifyPin\s*\\(/.test(html)],
+  ['persistent PIN throttling', /function readPinThrottle\s*\\(/.test(html) && /function writePinThrottle\s*\\(/.test(html)],
   ['service worker registration', /serviceWorker/.test(html)]
 ];
 for (const [label, ok] of appChecks) assert(ok, label);

@@ -1,4 +1,4 @@
-# Kasir Sotomie Kang Hendi — v1.0.1
+# Kasir Sotomie Kang Hendi — v1.0.2
 
 POS sederhana berbasis PWA untuk satu perangkat. Tidak memerlukan backend atau database server.
 

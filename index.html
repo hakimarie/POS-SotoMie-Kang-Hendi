@@ -193,6 +193,37 @@ var currentReceipt='';
 var pinFails=0;
 var pinBlockedUntil=0;
 var PIN_LOCK_KEY='skh_pin_lockout';
+var PIN_ITERATIONS=150000;
+function bytesToHex(buffer){
+  return Array.prototype.map.call(new Uint8Array(buffer),function(b){return b.toString(16).padStart(2,'0')}).join('');
+}
+function hexToBytes(value){
+  if(typeof value!=='string'||!/^(?:[0-9a-f]{2})+$/i.test(value))throw new Error('Invalid salt');
+  var out=new Uint8Array(value.length/2);
+  for(var i=0;i<out.length;i++)out[i]=parseInt(value.substr(i*2,2),16);
+  return out;
+}
+async function hashPin(pin){
+  if(!window.crypto||!crypto.subtle||!crypto.getRandomValues||!window.TextEncoder)throw new Error('Web Crypto unavailable');
+  var salt=crypto.getRandomValues(new Uint8Array(16));
+  var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+  var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:salt,iterations:PIN_ITERATIONS,hash:'SHA-256'},key,256);
+  return 'pbkdf2$'+PIN_ITERATIONS+'$'+bytesToHex(salt)+'$'+bytesToHex(bits);
+}
+async function verifyPin(pin,stored){
+  if(typeof stored!=='string'||!stored)return false;
+  if(stored.indexOf('pbkdf2$')!==0)return pin===stored;
+  var parts=stored.split('$'),iterations=Number(parts[1]);
+  if(parts.length!==4||!Number.isInteger(iterations)||iterations<100000||iterations>1000000||!/^[0-9a-f]{64}$/i.test(parts[3]))return false;
+  if(!window.crypto||!crypto.subtle||!window.TextEncoder)return false;
+  try{
+    var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+    var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:hexToBytes(parts[2]),iterations:iterations,hash:'SHA-256'},key,256);
+    var actual=bytesToHex(bits),expected=parts[3].toLowerCase(),diff=0;
+    for(var i=0;i<actual.length;i++)diff|=actual.charCodeAt(i)^expected.charCodeAt(i);
+    return diff===0;
+  }catch(e){return false}
+}
 function readPinThrottle(){
   try{
     var x=JSON.parse(localStorage.getItem(PIN_LOCK_KEY)||'null');
@@ -627,10 +658,16 @@ function saveWarung(){
   if(save()){render();alert('Pengaturan warung disimpan.');}
   else S.settings=previous;
 }
-function savePin(){
+async function savePin(){
   var v=$('#setPin').value.trim();
   if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
-  var old=S.settings.pin;S.settings.pin=v;if(!save()){S.settings.pin=old;return}alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Tidak dapat mengamankan PIN. Pastikan aplikasi dibuka melalui HTTPS di browser modern.');return}
+  if(!save()){S.settings.pin=old;return}
+  $('#setPin').value='';
+  writePinThrottle({fails:0,blockedUntil:0});
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
 }
 function saveProducts(){
   var previousProducts=S.products.map(function(p){return Object.assign({},p)});
@@ -746,15 +783,16 @@ function importJSON(file){
   r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
   r.readAsText(file);
 }
-function resetApp(){
+async function resetApp(){
   if(S.settings.pin){
     var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
-    if(entered!==S.settings.pin){alert('PIN salah. Data tidak dihapus.');return}
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
   }
   if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
   if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
   try{
     localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(PIN_LOCK_KEY);
     localStorage.removeItem('skh_last_backup');
     Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
     location.reload();
@@ -768,7 +806,7 @@ function lockApp(){
   $('#lock').classList.remove('hidden');
   setTimeout(function(){$('#pinInput').focus()},100);
 }
-function unlock(){
+async function unlock(){
   var throttle=readPinThrottle(),now=Date.now();
   if(now<throttle.blockedUntil){
     var seconds=Math.ceil((throttle.blockedUntil-now)/1000);
@@ -776,7 +814,14 @@ function unlock(){
     return;
   }
   var v=$('#pinInput').value;
-  if(v===S.settings.pin){
+  if(await verifyPin(v,S.settings.pin)){
+    if(S.settings.pin.indexOf('pbkdf2$')!==0){
+      try{
+        var old=S.settings.pin;
+        S.settings.pin=await hashPin(v);
+        if(!save()){S.settings.pin=old;return}
+      }catch(e){$('#pinErr').textContent='PIN benar, tetapi browser tidak dapat mengamankan PIN. Gunakan HTTPS dan browser modern.';return}
+    }
     writePinThrottle({fails:0,blockedUntil:0});
     $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
   }else{

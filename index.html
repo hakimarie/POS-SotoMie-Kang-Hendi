@@ -581,8 +581,13 @@ function voidTx(id){
   if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
   var r=prompt('Alasan pembatalan (opsional):','');
   if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
   t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
-  save();closeModalForce();render();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
   alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
 }
 
@@ -602,11 +607,13 @@ function closeModalForce(){
 
 /* ================= settings actions ================= */
 function saveWarung(){
+  var previous=Object.assign({},S.settings);
   S.settings.warung=$('#setWarung').value.trim()||'Kasir';
   S.settings.alamat=$('#setAlamat').value.trim();
   S.settings.telepon=$('#setTelp').value.trim();
   S.settings.footer=$('#setFooter').value.trim();
   if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
 }
 function savePin(){
   var v=$('#setPin').value.trim();
@@ -614,6 +621,7 @@ function savePin(){
   var old=S.settings.pin;S.settings.pin=v;if(!save()){S.settings.pin=old;return}alert(v?'PIN aktif.':'PIN dinonaktifkan.');
 }
 function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
   for(var i=0;i<S.products.length;i++){
     var p=S.products[i];
     var n=($('#pn_'+p.id).value||'').trim();
@@ -623,20 +631,26 @@ function saveProducts(){
     p.name=n;p.price=Math.round(pr);
   }
   if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
 }
 function addProduct(){
   var n=($('#newName').value||'').trim();
   var pr=Number($('#newPrice').value||0);
   if(!n){alert('Isi nama produk.');return}
   if(pr<0){alert('Harga tidak boleh negatif.');return}
-  S.products.push({id:'p'+rid(),name:n,price:Math.round(pr),cat:''});
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
   if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
 }
 function delProduct(id){
   if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
   S.products=S.products.filter(function(p){return p.id!==id});
   cart=cart.filter(function(c){return c.pid!==id});
   if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
 }
 
 /* ================= backup ================= */

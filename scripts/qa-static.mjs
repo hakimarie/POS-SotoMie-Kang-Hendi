@@ -31,8 +31,8 @@ const appChecks = [
   ['QRIS payment flow', /qris/i.test(html)],
   ['transaction void flow', /void/i.test(html)],
   ['backup and restore controls', /backup/i.test(html) && /restore/i.test(html)],
-  ['PIN hashing implementation', /async function hashPin\s*\\(/.test(html)],
-  ['PIN verification implementation', /async function verifyPin\s*\\(/.test(html)],
+  ['PIN hashing implementation', html.includes('async function hashPin(')],
+  ['PIN verification implementation', html.includes('async function verifyPin(')],
   ['persistent PIN throttling', /function readPinThrottle\s*\\(/.test(html) && /function writePinThrottle\s*\\(/.test(html)],
   ['service worker registration', /serviceWorker/.test(html)]
 ];

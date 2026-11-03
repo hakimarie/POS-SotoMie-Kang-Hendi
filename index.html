@@ -192,6 +192,49 @@ var pay={method:'CASH',cash:0,qrisOk:false};
 var currentReceipt='';
 var pinFails=0;
 var pinBlockedUntil=0;
+var PIN_LOCK_KEY='skh_pin_lockout';
+var PIN_ITERATIONS=150000;
+function bytesToHex(buffer){
+  return Array.prototype.map.call(new Uint8Array(buffer),function(b){return b.toString(16).padStart(2,'0')}).join('');
+}
+function hexToBytes(value){
+  if(typeof value!=='string'||!/^(?:[0-9a-f]{2})+$/i.test(value))throw new Error('Invalid salt');
+  var out=new Uint8Array(value.length/2);
+  for(var i=0;i<out.length;i++)out[i]=parseInt(value.substr(i*2,2),16);
+  return out;
+}
+async function hashPin(pin){
+  if(!window.crypto||!crypto.subtle||!crypto.getRandomValues||!window.TextEncoder)throw new Error('Web Crypto unavailable');
+  var salt=crypto.getRandomValues(new Uint8Array(16));
+  var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+  var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:salt,iterations:PIN_ITERATIONS,hash:'SHA-256'},key,256);
+  return 'pbkdf2$'+PIN_ITERATIONS+'$'+bytesToHex(salt)+'$'+bytesToHex(bits);
+}
+async function verifyPin(pin,stored){
+  if(typeof stored!=='string'||!stored)return false;
+  if(stored.indexOf('pbkdf2$')!==0)return pin===stored;
+  var parts=stored.split('$'),iterations=Number(parts[1]);
+  if(parts.length!==4||!Number.isInteger(iterations)||iterations<100000||iterations>1000000||!/^[0-9a-f]{64}$/i.test(parts[3]))return false;
+  if(!window.crypto||!crypto.subtle||!window.TextEncoder)return false;
+  try{
+    var key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+    var bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:hexToBytes(parts[2]),iterations:iterations,hash:'SHA-256'},key,256);
+    var actual=bytesToHex(bits),expected=parts[3].toLowerCase(),diff=0;
+    for(var i=0;i<actual.length;i++)diff|=actual.charCodeAt(i)^expected.charCodeAt(i);
+    return diff===0;
+  }catch(e){return false}
+}
+function readPinThrottle(){
+  try{
+    var x=JSON.parse(localStorage.getItem(PIN_LOCK_KEY)||'null');
+    if(x&&Number.isInteger(x.fails)&&Number.isFinite(x.blockedUntil))return x;
+  }catch(e){}
+  return {fails:pinFails,blockedUntil:pinBlockedUntil};
+}
+function writePinThrottle(x){
+  pinFails=x.fails;pinBlockedUntil=x.blockedUntil;
+  try{localStorage.setItem(PIN_LOCK_KEY,JSON.stringify(x))}catch(e){}
+}
 var savingTx=false;
 
 /* ================= helpers ================= */
@@ -408,7 +451,7 @@ function renderAtur(){
     +'</div>';
 
   h+='<div class="card"><h3>Tentang</h3>'
-    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.1 · penyimpanan lokal di perangkat.</p>'
+    +'<p class="muted">Kasir Sotomie Kang Hendi v1.0.2 · penyimpanan lokal di perangkat.</p>'
     +'<button class="btn danger" onclick="resetApp()">Hapus semua data</button>'
     +'</div>';
   return h;
@@ -581,8 +624,13 @@ function voidTx(id){
   if(!confirm('Batalkan transaksi '+t.no+' sebesar '+money(t.total)+'?'))return;
   var r=prompt('Alasan pembatalan (opsional):','');
   if(r===null)return;
+  var previous={voided:t.voided,voidedAt:t.voidedAt,voidReason:t.voidReason};
   t.voided=true;t.voidedAt=Date.now();t.voidReason=r.trim();
-  save();closeModalForce();render();
+  if(!save()){
+    t.voided=previous.voided;t.voidedAt=previous.voidedAt;t.voidReason=previous.voidReason;
+    return;
+  }
+  closeModalForce();render();
   alert('Transaksi dibatalkan. Data tetap tersimpan untuk audit.');
 }
 
@@ -602,41 +650,65 @@ function closeModalForce(){
 
 /* ================= settings actions ================= */
 function saveWarung(){
+  var previous=Object.assign({},S.settings);
   S.settings.warung=$('#setWarung').value.trim()||'Kasir';
   S.settings.alamat=$('#setAlamat').value.trim();
   S.settings.telepon=$('#setTelp').value.trim();
   S.settings.footer=$('#setFooter').value.trim();
   if(save()){render();alert('Pengaturan warung disimpan.');}
+  else S.settings=previous;
 }
-function savePin(){
+async function savePin(){
   var v=$('#setPin').value.trim();
   if(v&&!/^\d{4}$/.test(v)){alert('PIN harus 4 digit angka.');return}
-  var old=S.settings.pin;S.settings.pin=v;if(!save()){S.settings.pin=old;return}alert(v?'PIN aktif.':'PIN dinonaktifkan.');
+  var old=S.settings.pin;
+  try{S.settings.pin=v?await hashPin(v):''}
+  catch(e){alert('Tidak dapat mengamankan PIN. Pastikan aplikasi dibuka melalui HTTPS di browser modern.');return}
+  if(!save()){S.settings.pin=old;return}
+  $('#setPin').value='';
+  writePinThrottle({fails:0,blockedUntil:0});
+  alert(v?'PIN aktif.':'PIN dinonaktifkan.');
 }
 function saveProducts(){
+  var previousProducts=S.products.map(function(p){return Object.assign({},p)});
   for(var i=0;i<S.products.length;i++){
     var p=S.products[i];
     var n=($('#pn_'+p.id).value||'').trim();
-    var pr=Number($('#pp_'+p.id).value||0);
-    if(!n){alert('Nama produk tidak boleh kosong.');return}
-    if(pr<0){alert('Harga tidak boleh negatif.');return}
+    var rawPrice=$('#pp_'+p.id).value;
+    var pr=Number(rawPrice);
+    if(!n){
+      S.products=previousProducts;
+      alert('Nama produk tidak boleh kosong.');
+      return;
+    }
+    if(rawPrice.trim()===''||!Number.isFinite(pr)||pr<0||!Number.isSafeInteger(Math.round(pr))){
+      S.products=previousProducts;
+      alert('Harga produk harus berupa angka nol atau lebih.');
+      return;
+    }
     p.name=n;p.price=Math.round(pr);
   }
   if(save()){render();alert('Produk disimpan.');}
+  else S.products=previousProducts;
 }
 function addProduct(){
   var n=($('#newName').value||'').trim();
   var pr=Number($('#newPrice').value||0);
   if(!n){alert('Isi nama produk.');return}
   if(pr<0){alert('Harga tidak boleh negatif.');return}
-  S.products.push({id:'p'+rid(),name:n,price:Math.round(pr),cat:''});
+  var product={id:'p'+rid(),name:n,price:Math.round(pr),cat:''};
+  S.products.push(product);
   if(save()){render();alert('Produk ditambahkan.');}
+  else S.products.pop();
 }
 function delProduct(id){
   if(!confirm('Hapus produk ini dari daftar menu? Riwayat transaksi lama tetap aman.'))return;
+  var previousProducts=S.products;
+  var previousCart=cart;
   S.products=S.products.filter(function(p){return p.id!==id});
   cart=cart.filter(function(c){return c.pid!==id});
   if(save())render();
+  else{S.products=previousProducts;cart=previousCart;}
 }
 
 /* ================= backup ================= */
@@ -711,15 +783,16 @@ function importJSON(file){
   r.onerror=function(){$('#impFile').value='';alert('File tidak dapat dibaca.')};
   r.readAsText(file);
 }
-function resetApp(){
+async function resetApp(){
   if(S.settings.pin){
     var entered=prompt('Masukkan PIN kasir untuk menghapus seluruh data:');
-    if(entered!==S.settings.pin){alert('PIN salah. Data tidak dihapus.');return}
+    if(entered===null||!await verifyPin(entered,S.settings.pin)){alert('PIN salah. Data tidak dihapus.');return}
   }
   if(!confirm('Hapus SEMUA data (produk, transaksi, pengaturan)? Tindakan ini tidak bisa dibatalkan.'))return;
   if(!confirm('Konfirmasi terakhir: pastikan backup JSON sudah disimpan di luar perangkat.'))return;
   try{
     localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(PIN_LOCK_KEY);
     localStorage.removeItem('skh_last_backup');
     Object.keys(localStorage).filter(function(k){return k.indexOf('skh_backup_')===0}).forEach(function(k){localStorage.removeItem(k)});
     location.reload();
@@ -733,25 +806,33 @@ function lockApp(){
   $('#lock').classList.remove('hidden');
   setTimeout(function(){$('#pinInput').focus()},100);
 }
-function unlock(){
-  var now=Date.now();
-  if(now<pinBlockedUntil){
-    var seconds=Math.ceil((pinBlockedUntil-now)/1000);
+async function unlock(){
+  var throttle=readPinThrottle(),now=Date.now();
+  if(now<throttle.blockedUntil){
+    var seconds=Math.ceil((throttle.blockedUntil-now)/1000);
     $('#pinErr').textContent='Terlalu banyak percobaan. Coba lagi '+seconds+' detik.';
     return;
   }
   var v=$('#pinInput').value;
-  if(v===S.settings.pin){
-    pinFails=0;pinBlockedUntil=0;
+  if(await verifyPin(v,S.settings.pin)){
+    if(S.settings.pin.indexOf('pbkdf2$')!==0){
+      try{
+        var old=S.settings.pin;
+        S.settings.pin=await hashPin(v);
+        if(!save()){S.settings.pin=old;return}
+      }catch(e){$('#pinErr').textContent='PIN benar, tetapi browser tidak dapat mengamankan PIN. Gunakan HTTPS dan browser modern.';return}
+    }
+    writePinThrottle({fails:0,blockedUntil:0});
     $('#lock').classList.add('hidden');$('#pinInput').value='';$('#pinErr').textContent='';
   }else{
-    pinFails++;
-    if(pinFails>=5){
-      pinBlockedUntil=Date.now()+Math.min(30000*(pinFails-4),300000);
+    throttle.fails++;
+    if(throttle.fails>=5){
+      throttle.blockedUntil=Date.now()+Math.min(30000*(throttle.fails-4),300000);
       $('#pinErr').textContent='PIN salah. Akses ditunda sementara.';
     }else{
-      $('#pinErr').textContent='PIN salah ('+pinFails+'/5 percobaan)';
+      $('#pinErr').textContent='PIN salah ('+throttle.fails+'/5 percobaan)';
     }
+    writePinThrottle(throttle);
     $('#pinInput').value='';
   }
 }
